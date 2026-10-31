@@ -2,7 +2,7 @@
 
 ## TLDR
 
-Build one Python API on Render and one TypeScript join page on Vercel. Supabase provides Auth and Postgres; Resend supplies SMTP for Auth emails.
+Build one Python API on Render and one TypeScript join page on Vercel. Supabase provides Auth and Postgres; Gmail SMTP is the initial Auth email delivery target, using the founder's existing address.
 
 A founder submits an approved waitlist entry. TBD emails a Join TBD link. Opening it shows one button; pressing Join verifies the email and creates the User from the stored entry. Individuals and small businesses use the same flow. Founders can seed other businesses directly.
 
@@ -33,7 +33,7 @@ Confirmed decisions:
 | TypeScript / Vite page | One join interaction and success/error states; no general login or profile application |
 | Supabase Auth | Email invitation tokens, verification, short-lived authentication for joining |
 | Supabase Postgres | Approved entries, joined/seeded Users, saved addresses |
-| Resend SMTP | Deliver Supabase Auth emails using a verified TBD sending domain |
+| Gmail SMTP | Deliver Supabase Auth emails using the founder's Gmail address and Google App Password |
 
 Use Supabase's Python SDK for Auth and Psycopg for transactional SQL. No ORM, queue, separate auth service, or file-storage bucket. Keep Auth administrative clients separate from clients that validate user sessions; never mutate a shared privileged client's session.
 
@@ -139,7 +139,7 @@ Founder commands `invite`, `resend`, and `seed-business` read JSON from a file/s
 
 1. Backend: migrations, API, founder commands, profile/address contract, meaningful tests, and Render configuration.
 2. Client: join page, Supabase templates/SMTP setup instructions, and Vercel configuration. Target the backend contract rather than duplicate its logic.
-3. Integration: configure the verified sending domain and Auth settings, deploy both repos, and exercise the matrix below. Record evidence on the parent issue.
+3. Integration: configure Gmail SMTP and Auth settings, deploy both repos, and exercise the matrix below. Record evidence on the parent issue.
 
 Work: [TBD-13 parent](https://linear.app/apt-knows/issue/TBD-13), then [TBD-14 backend](https://linear.app/apt-knows/issue/TBD-14), [TBD-15 join page](https://linear.app/apt-knows/issue/TBD-15), and [TBD-16 deployed proof](https://linear.app/apt-knows/issue/TBD-16). Each child is one substantial deliverable; do not split into endpoint-level tickets. Implementation starts after review of the planning PRs.
 
@@ -166,7 +166,7 @@ Work: [TBD-13 parent](https://linear.app/apt-knows/issue/TBD-13), then [TBD-14 b
 
 A founder can invite a permitted external email using stored waitlist details. The recipient opens the deployed page, presses Join, and becomes exactly one User. The same flow supports small businesses. A founder can seed a business without inventing a contact channel. Profile and address operations pass their own-user, conflict, and clearing tests. The tested sender-resolution contract is ready for Messaging.
 
-Completion requires deployed end-to-end evidence, not only green unit tests. Domain/SMTP credentials and working Render/Vercel deployments are launch prerequisites; current setup gaps are in [setup.md](setup.md).
+Completion requires deployed end-to-end evidence, not only green unit tests. SMTP credentials and working Render/Vercel deployments are launch prerequisites; current setup gaps are in [setup.md](setup.md). Vercel verification is deferred until needed and does not block planning.
 
 ## Non-Goals
 
@@ -176,6 +176,6 @@ Waitlist collection/sync, Messaging transport, Agent runtime/memory, business me
 
 - [Approved service drawing](architecture.excalidraw); [Linear User Service project](https://linear.app/apt-knows/project/user-service-89260eb3e4ce/overview).
 - [Product scope](https://app.notion.com/p/3fa726cebd9080d2a096deed0fc4d440); [Tech Hub](https://app.notion.com/p/3cb726cebd9080be90cdd38c5f2125ad). This design incorporates the founders' later terminology and email-join decisions.
-- [Supabase invitations](https://supabase.com/docs/reference/python/auth-admin-inviteuserbyemail), [email templates and prefetching](https://supabase.com/docs/guides/auth/auth-email-templates), [passwordless recovery](https://supabase.com/docs/guides/auth/auth-email-passwordless), [SMTP](https://supabase.com/docs/guides/auth/auth-smtp), [Resend integration](https://resend.com/docs/send-with-supabase-smtp), [database connections](https://supabase.com/docs/guides/database/connecting-to-postgres).
+- [Supabase invitations](https://supabase.com/docs/reference/python/auth-admin-inviteuserbyemail), [email templates and prefetching](https://supabase.com/docs/guides/auth/auth-email-templates), [passwordless recovery](https://supabase.com/docs/guides/auth/auth-email-passwordless), [SMTP](https://supabase.com/docs/guides/auth/auth-smtp), [Google App Passwords](https://support.google.com/accounts/answer/185833), [Gmail SMTP settings](https://support.google.com/mail/answer/7104828), [database connections](https://supabase.com/docs/guides/database/connecting-to-postgres).
 - [Render deploys](https://render.com/docs/deploys), [health checks](https://render.com/docs/health-checks), [FastAPI deployment](https://fastapi.tiangolo.com/deployment/manually/).
 - Platform documentation checked 2026-10-31, including Supabase's current changelog. Custom SMTP is required for the custom join templates on a new free project.
