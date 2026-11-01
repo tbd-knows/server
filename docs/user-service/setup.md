@@ -79,7 +79,7 @@ Disable link tracking. A link GET must not verify a token. After explicit verifi
 
 Only an explicitly authorized recipient may receive a live test message. The founder has explicitly authorized one individual and one business test recipient, recorded privately outside Git. Use distinct synthetic test phones. TBD-16 records deployed URLs/SHAs, inbox delivery, both User types, recovery, failures, and browser table denial. Local tests and SMTP acceptance do not establish delivery or full-service completion.
 
-Primary references checked for implementation: [Supabase Python invitations](https://supabase.com/docs/reference/python/auth-admin-inviteuserbyemail), [list users](https://supabase.com/docs/reference/python/auth-admin-listusers), [database roles](https://supabase.com/docs/guides/database/postgres/roles), [Render FastAPI](https://render.com/docs/deploy-fastapi), [Render blueprint](https://render.com/docs/blueprint-spec). The current Supabase changelog was checked; its upcoming HTTP TLS cipher removal requires no special code with the supported Python/OpenSSL stack. Live configuration remains unverified.
+Primary references checked for implementation: [Supabase Python invitations](https://supabase.com/docs/reference/python/auth-admin-inviteuserbyemail), [list users](https://supabase.com/docs/reference/python/auth-admin-listusers), [database roles](https://supabase.com/docs/guides/database/postgres/roles), [Render FastAPI](https://render.com/docs/deploy-fastapi), [Render blueprint](https://render.com/docs/blueprint-spec). The current Supabase changelog was checked; its upcoming HTTP TLS cipher removal requires no special code with the supported Python/OpenSSL stack.
 
 
 ## Current deployed acceptance
