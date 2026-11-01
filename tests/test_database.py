@@ -331,6 +331,12 @@ def test_http_invite_join_retry_failure_recovery_and_profile_contract(store, mon
         transport=httpx.MockTransport(handler),
     )
     client = TestClient(create_app(store, auth, "provisioning-test", "internal-test", ["http://localhost:5173"]))
+    # A valid, confirmed Auth response does not establish application admission.
+    user["email_confirmed_at"] = "2026-01-01T00:00:00Z"
+    assert client.post("/v1/join", headers={"Authorization": "Bearer fake-verified-session"}).status_code == 403
+    with store.transaction() as cur:
+        assert cur.execute("SELECT count(*) AS n FROM users WHERE auth_user_id=%s", (identity,)).fetchone()["n"] == 0
+    user["email_confirmed_at"] = None
     provisioning = {"Authorization": "Bearer provisioning-test"}
     approved_data = {"name": "Stored Example", "email": user["email"], "phone": "+12125550196", "type": "business"}
     response = client.post("/internal/invitations", json=approved_data, headers=provisioning)
