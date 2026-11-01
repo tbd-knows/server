@@ -1,6 +1,6 @@
 # TBD-14 implementation checkpoint
 
-Updated 2026-11-01. **TBD-16 In Progress.** Backend and client reviews passed; both PRs remain open/unmerged pending complete service acceptance. Both live join/recovery flows are accepted: exactly one correctly typed User per authorized account, approved details and original Auth identities preserved. Working fragment links and actual inbox delivery are verified. The matrix below states the evidence level for every row.
+Updated 2026-11-01. **Accepted.** Final User service v1 acceptance passed; the founder accepted the documented mix of live and controlled evidence. Both PRs are authorized for merge. Both live join/recovery flows are accepted: exactly one correctly typed User per authorized account, approved details and original Auth identities preserved. Working fragment links and actual inbox delivery are verified. The matrix below states the evidence level for every row.
 
 Review: [backend PR #2](https://github.com/tbd-knows/server/pull/2), branch `robiemelaku/tbd-14-user-service`. Both planning merges are present. Backend review passed at `2bb8c5103d30a48199f506770672bda8957d5e6e`; client review passed at `2c5ebe0fa33d929a85cc74d47807199c162aac7a` ([client PR #2](https://github.com/tbd-knows/client/pull/2)). Integration uses these same branches.
 
@@ -43,7 +43,7 @@ Evidence includes:
 
 ## Reconciled acceptance matrix
 
-Updated after both live flows were accepted. **TBD-16 remains In Progress; both PRs remain open/unmerged for final acceptance review.** No application-source, deployment, migration or joined-account changes were needed for this reconciliation.
+Updated after both live flows were accepted. **Accepted.** Final review accepted the evidence boundary below; no additional hosted fault injection or account resets are required. No application-source, deployment, migration or joined-account changes were needed for this reconciliation.
 
 | Approved scenario | Executed result and evidence | Level |
 | --- | --- | --- |
@@ -74,7 +74,7 @@ Result: **1 passed, zero skipped**, known upstream deprecation warning. Changed-
 
 ### Exact limits and status
 
-No failed application assertion remains in the reconciled matrix. The following are **not independently repeated live**: a fresh verified identity with no approval, a fresh unconsumed token allowed to expire naturally, signup-field tampering using a live session, simultaneous first-time live joins, loss of a successful live commit response, and a real SMTP failure. They have controlled browser/SDK/API/real-database evidence as stated above. Do not describe these as entirely hosted proof. Both authorized live identities are already joined and must be preserved; no account reset, approval deletion, new recipient, live timeout setting change or deliberate SMTP outage is justified to repeat them. If final review requires every injected failure independently hosted, those exact cases require a separately agreed fixture/session plan; the current report makes no such claim.
+No failed application assertion remains in the reconciled matrix. The following are **not independently repeated live**: a fresh verified identity with no approval, a fresh unconsumed token allowed to expire naturally, signup-field tampering using a live session, simultaneous first-time live joins, loss of a successful live commit response, and a real SMTP failure. They have controlled browser/SDK/API/real-database evidence as stated above. Do not describe these as entirely hosted proof. Both authorized live identities are already joined and must be preserved; no account reset, approval deletion, new recipient, live timeout setting change or deliberate SMTP outage is justified to repeat them. The founder explicitly accepted this evidence mix. These limits remain documented; no additional hosted fault injection is required.
 
 The email **link bodies work**: initial invite type=invite and confirmed recovery type=email target the reviewed canonical /join page. Received subjects remain `You've been invited` and `Your sign-in link` despite founder-saved `Join TBD` subjects. This is a **nonblocking configuration difference**, not a broken-link or joining failure; no new sends/config changes were made to investigate it in this run.
 
@@ -86,4 +86,4 @@ A read-only SQL refresh in the new Codex connection failed with `MCP -32001: Unk
 - Client: <https://client-pi-five-28.vercel.app/join>, deployed code **2c5ebe0fa33d929a85cc74d47807199c162aac7a**. Reviewed page, Vite configuration, exact API origin and CORS accepted.
 - Supabase migration **20261101103939** is already applied; no reapplication/reset. Public signup disabled; SMTP/inbox delivery verified.
 - Branch documentation/test heads are newer than deployed code. No application behavior changed during reconciliation, so no redeploy was needed.
-- Both existing PRs remain unmerged; TBD-16 remains In Progress pending final acceptance of this evidence boundary. Default subjects do not block functional acceptance.
+- Final service acceptance passed. Merge SHAs and final deployed SHAs are separate release facts, recorded in the closing TBD-16/TBD-13 comments and release report. Default subjects remain a nonblocking configuration difference. Deployment tracking follows main after coordinated merge; Render retains manual deploys.

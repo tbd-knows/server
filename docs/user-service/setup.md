@@ -1,10 +1,10 @@
 # User service setup
 
-Updated 2026-11-01. Backend and client reviews passed. [Server PR #2](https://github.com/tbd-knows/server/pull/2) and [client PR #2](https://github.com/tbd-knows/client/pull/2) remain open/unmerged until full service acceptance. TBD-16 is In Progress. [Current evidence](implementation-status.md) distinguishes local tests from deployment proof.
+Updated 2026-11-01. **Accepted.** Backend, client and final v1 acceptance passed. [Server PR #2](https://github.com/tbd-knows/server/pull/2) and [client PR #2](https://github.com/tbd-knows/client/pull/2) are authorized for coordinated merge. [Current evidence](implementation-status.md) distinguishes local tests from deployment proof.
 
 | Component | State / next action |
 | --- | --- |
-| GitHub | Both implementation reviews passed; use the existing server/client branches for integration, then merge both only after acceptance. |
+| GitHub | Final v1 acceptance passed. Both existing PRs are authorized for merge to main. |
 | Supabase | Use existing `tbd-v1`, reference `xclftpnjwrmakooaaxik`. Reviewed migration applied at version `20261101103939`. Private schema/RLS/grants and browser Data API denial verified. Public signup is verified disabled (`disable_signup=true`, email still enabled). SMTP inbox delivery and correct fragment links pass; both authorized accounts have joined with original Auth identities. Default subjects are a nonblocking difference. Never change old `aptknows-auth`. |
 | Render | Verified TBD workspace. Created free Python service `srv-dbjhuto473hc739t8c9g` from the existing backend branch with auto-deploy off. Live at `https://tbd-user-api.onrender.com`, commit `a9045c8d4ef369188581c35d2fe21004aa80590f`. Actual startup SQL confirms backend role, TLS and session pooling. Inspect workspace `tea-das0s48u01pc73e7km90` before provisioning/reusing one service. |
 | Vercel | Existing imported `client` project in `robel-kebedes-projects` is deployed at reviewed commit `2c5ebe0fa33d929a85cc74d47807199c162aac7a`; <https://client-pi-five-28.vercel.app/join> serves the reviewed page. CLI/direct MCP access resolved the historical connector 404. No replacement project created. |
@@ -96,4 +96,4 @@ Received email subjects still use Supabase defaults despite saved `Join TBD` sub
 
 Previous bundled Render tool-routing errors and Vercel project 404s were resolved through direct MCP/CLI access; no replacement projects were created. The new account's attempted Supabase read-only SQL refresh returned MCP -32001 Unknown tool for supabase.execute_sql; accepted prior SQL evidence remains valid, but further SQL work requires restoring that connection. This is not a new application failure.
 
-TBD-16 stays In Progress and both PRs remain open/unmerged pending final acceptance review of the reconciled evidence. See implementation-status.md for exact evidence limits and current next action.
+Final v1 acceptance is **Accepted**. The founder accepted all documented evidence limits and the nonblocking email subject difference. Deployment tracking follows main while preserving secrets, CORS, URLs, build/start commands and Render manual deploys. Actual merge SHAs and final deployed SHAs are recorded separately in the closing TBD-16/TBD-13 comments and release report. No further fault injection, account reset or full-suite rerun is required.
