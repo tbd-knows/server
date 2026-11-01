@@ -8,7 +8,7 @@ A founder submits an approved waitlist entry. TBD emails a Join TBD link. Openin
 
 The service also owns saved profile details and addresses. Messaging and Agent are subsequent implementations; this service provides their tested integration contract.
 
-Status: implementation proposal for founder review. The high-level service boundaries are approved. This document supplies the implementation details. See [the drawing](architecture.excalidraw) and [setup status](setup.md).
+Status: approved by both founders; implementation is in progress under TBD-14. See [the drawing](architecture.excalidraw) and [setup status](setup.md).
 
 ## Background Information / Context
 
@@ -141,7 +141,7 @@ Founder commands `invite`, `resend`, and `seed-business` read JSON from a file/s
 2. Client: join page, Supabase templates/SMTP setup instructions, and Vercel configuration. Target the backend contract rather than duplicate its logic.
 3. Integration: configure Gmail SMTP and Auth settings, deploy both repos, and exercise the matrix below. Record evidence on the parent issue.
 
-Work: [TBD-13 parent](https://linear.app/apt-knows/issue/TBD-13), then [TBD-14 backend](https://linear.app/apt-knows/issue/TBD-14), [TBD-15 join page](https://linear.app/apt-knows/issue/TBD-15), and [TBD-16 deployed proof](https://linear.app/apt-knows/issue/TBD-16). Each child is one substantial deliverable; do not split into endpoint-level tickets. Implementation starts after review of the planning PRs.
+Work: [TBD-13 parent](https://linear.app/apt-knows/issue/TBD-13), then [TBD-14 backend](https://linear.app/apt-knows/issue/TBD-14), [TBD-15 join page](https://linear.app/apt-knows/issue/TBD-15), and [TBD-16 deployed proof](https://linear.app/apt-knows/issue/TBD-16). Each child is one substantial deliverable; do not split into endpoint-level tickets. Both planning PRs are merged; implementation follows the approved contract.
 
 ### Required verification
 
