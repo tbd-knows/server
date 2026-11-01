@@ -1,8 +1,8 @@
 # TBD-14 implementation checkpoint
 
-Updated 2026-11-01. **In Progress, awaiting review.** Backend candidate is locally tested; no hosted deployment or delivery acceptance is claimed.
+Updated 2026-11-01. **TBD-16 In Progress.** Backend and client reviews passed; both PRs remain open/unmerged pending complete service acceptance. Hosted schema/access checks have started; no hosted application or delivery acceptance is claimed.
 
-Review: [draft backend PR #2](https://github.com/tbd-knows/server/pull/2), branch `robiemelaku/tbd-14-user-service`. Both planning merges are present. Client remains unchanged; TBD-15 has not started.
+Review: [backend PR #2](https://github.com/tbd-knows/server/pull/2), branch `robiemelaku/tbd-14-user-service`. Both planning merges are present. Backend review passed at `2bb8c5103d30a48199f506770672bda8957d5e6e`; client review passed at `2c5ebe0fa33d929a85cc74d47807199c162aac7a` ([client PR #2](https://github.com/tbd-knows/client/pull/2)). Integration uses these same branches.
 
 ## Implemented candidate
 
@@ -13,7 +13,7 @@ Review: [draft backend PR #2](https://github.com/tbd-knows/server/pull/2), branc
 - Address PUT `operation: "save"` creates once; identical retries are no-ops without revision increments, while changed content under the same ID conflicts. `operation: "edit"` requires an existing owned address and current revision, never creates a missing address, and preserves default status. These are tested and documented request details of the approved contract.
 - Founder CLI, OpenAPI request/response/error schemas, exact CORS origins, no-store/no-referrer responses, and sanitized errors/results.
 - Exact dependencies and generated `uv.lock`; Python 3.12.12 and uv 0.13.6.
-- CLI-generated release migration `supabase/migrations/20261101045729_user_service.sql`; private schema, three tables, constraints, one-default index, backend login grants and RLS, no browser grants/policies. The old test-only schema copy was removed; database tests apply the actual release file.
+- CLI-generated release migration `supabase/migrations/20261101103939_user_service.sql`; private schema, three tables, constraints, one-default index, backend login grants and RLS, no browser grants/policies. The old test-only schema copy was removed; database tests apply the actual release file.
 - Render preparation in `render.yaml`, secret-free env template, runnable README and setup instructions. No automatic migration or paid resource was introduced.
 
 ## Verification actually run
@@ -49,9 +49,9 @@ Historical failures were `git push`/package installs with DNS resolution errors,
 
 Remaining acceptance:
 
-1. Planning/founder review of the actual draft PR, migration, and contract; address any feedback. Keep TBD-14 In Progress until review completes.
-2. Apply reviewed migration to `tbd-v1` explicitly and verify hosted Auth/database grants, custom-role/pooler connectivity, Render build/deployment, and protected API behavior during TBD-16. Render blueprint is preparation, not hosted proof.
-3. Later TBD-15 client verification and TBD-16 full scanner/explicit-click/expired-link recovery and external inbox evidence. No real recipient is authorized yet; no test email was sent.
+1. Both implementation reviews passed with no requested changes. Hold both PRs unmerged until the complete User service passes acceptance. TBD-16 is now In Progress; no new branch or PR is used for integration.
+2. Reviewed migration is explicitly applied to `tbd-v1`, recorded as `20261101103939`; local filename aligned without SQL changes. Hosted RLS/grants, public Data API denial and rollback-only backend-role SQL assertions pass. Custom-role password/pooler connectivity, hosted Auth configuration, Render deployment and protected API proof remain pending. See [setup.md](setup.md) for exact evidence and blockers.
+3. TBD-15 local browser verification and review passed. TBD-16 still requires full deployed scanner/explicit-click/expired-link recovery and external inbox evidence. No real recipient is authorized yet; no test email was sent.
 4. Founder enters the Gmail App Password directly in Supabase and configures templates/Auth URLs before delivery proof. Server/database secrets belong in secret stores, not chat. Vercel verification remains deferred.
 
-No intended scope/architecture deviation. The address operation discriminator makes save retry versus edit intent explicit on the existing endpoint. No new issue breakdown or product surface was added. Review and deployed acceptance remain distinct from local engineering evidence.
+No intended scope/architecture deviation. The address operation discriminator makes save retry versus edit intent explicit on the existing endpoint. No new issue breakdown or product surface was added. Deployed acceptance remains distinct from the accepted local engineering evidence. Current cloud blockers: Render access pending, expected Vercel client project not visible, public signup still enabled, server credentials/SMTP/templates not configured or verified, and no live recipient authorization yet. No email sent or application deployed.
