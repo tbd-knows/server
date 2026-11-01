@@ -6,7 +6,7 @@ Updated 2026-11-01. Backend and client reviews passed. [Server PR #2](https://gi
 | --- | --- |
 | GitHub | Both implementation reviews passed; use the existing server/client branches for integration, then merge both only after acceptance. |
 | Supabase | Use existing `tbd-v1`, reference `xclftpnjwrmakooaaxik`. Reviewed migration applied at version `20261101103939`. Private schema/RLS/grants and browser Data API denial verified. Public signup is now verified disabled (`disable_signup=true`, email still enabled). Founder reports Gmail SMTP saved directly; delivery/template/URL configuration remains unverified. Never change old `aptknows-auth`. |
-| Render | Deployment prepared in root `render.yaml`; no service created or deployed. Render is now installed and tools are advertised, but workspace/service calls return -32001 Unknown tool in this session. Direct MCP OAuth fallback is now authenticated; reload/resume is required to load its tools. Inspect workspace `tea-das0s48u01pc73e7km90` before provisioning/reusing one service. |
+| Render | Verified TBD workspace. Created free Python service `srv-dbjhuto473hc739t8c9g` from the existing backend branch with auto-deploy off. Build succeeded; startup is blocked by missing `DATABASE_URL`. Details below. Inspect workspace `tea-das0s48u01pc73e7km90` before provisioning/reusing one service. |
 | Vercel | Existing imported `client` project in `robel-kebedes-projects`. Connected account sees the supplied team but `client` returns 404 and is absent from its project list. Founder confirmed the existing Dashboard URL and production domain; connector access still returns 404. A Vercel team-consent link was requested; no replacement project created. |
 | Email | Founder reports Gmail SMTP saved directly; actual delivery remains unverified. Never enter the App Password into chat, Git, or the browser application. |
 
@@ -60,7 +60,7 @@ Start command:
 .venv/bin/uvicorn tbd_server.main:app --host 0.0.0.0 --port $PORT --workers 1 --no-access-log
 ```
 
-The blueprint points to `main`; deploy the reviewed merged implementation, or explicitly select the implementation branch for an authorized review deployment. Apply the migration first, then set all required environment values and deploy compatible code. `/healthz` checks process startup only; verify a protected API request and database behavior separately. Production URL is not known yet. Use the actual Render URL in the later client configuration.
+The blueprint points to `main`; deploy the reviewed merged implementation, or explicitly select the implementation branch for an authorized review deployment. Apply the migration first, then set all required environment values and deploy compatible code. `/healthz` checks process startup only; verify a protected API request and database behavior separately. Assigned API URL: `https://tbd-user-api.onrender.com` (not healthy/live yet). Use this URL in client configuration only when the service is verified.
 
 ## Gmail SMTP and join templates (TBD-16)
 
@@ -95,7 +95,7 @@ Checked 2026-11-01 against `tbd-v1` only. No old project, unrelated Vercel proje
 - Render calls must succeed before workspace inspection/service creation; the founder reports SMTP entered and has privately authorized the recipient pair. Final Auth URLs/templates, server secret configuration, and inbox delivery verification remain required.
 - Vercel `client` is not visible in the connected account/team. Founder confirmed `https://vercel.com/robel-kebedes-projects/client` and `https://client-pi-five-28.vercel.app`. The connector still cannot access it; resolve team consent before configuring/deploying it. The local CLI is not logged in; it was not used to create/link a replacement.
 
-No deployed API/join URL exists from this implementation yet. The full hosted API/email/browser acceptance matrix remains pending. Local accepted checks were not rerun merely because cloud access is pending.
+The API service now has an assigned URL, but no healthy API or reviewed-client deployment exists yet. The full hosted API/email/browser acceptance matrix remains pending. Local accepted checks were not rerun merely because cloud access is pending.
 
 
 ### Access retry after founder configuration update
@@ -109,3 +109,19 @@ Both reviewed application heads remain accepted. The migration and completed dat
 - The supplied production `/join` URL returns **404 / NOT_FOUND** before deployment. The founder reports its current production source as main `705c5dd`; this session has not verified a deployment SHA through Vercel metadata.
 
 No live invitation has been sent. Authorized records are stored only in private temporary input files outside both repositories; addresses and SMTP credentials are excluded from public evidence. No new API or reviewed-branch client deployment exists yet. Credentialed pooler connectivity, templates/redirects/CORS, both real join types and the hosted recovery/access matrix remain pending hosting/Auth access.
+
+
+### Render workspace verified and service created
+
+The bundled Render routes still report `-32001 Unknown tool`. The authenticated direct MCP connection is usable through the local Codex app-server tool interface. This path starts no model turn and does not extract credentials. The temporary helper is `/private/tmp/tbd16-render-rpc.py`; it discovers tools and invokes them using the already authenticated `render` connection. Its invocation schema was obtained from the installed CLI, not guessed.
+
+- `list_workspaces` succeeded and verified **TBD / tea-das0s48u01pc73e7km90**. Explicitly scoped `list_services` found no existing services.
+- Created exactly one free Python web service: **tbd-user-api / srv-dbjhuto473hc739t8c9g**, region Virginia, repository `tbd-knows/server`, branch `robiemelaku/tbd-14-user-service`, automatic deploys off, approved build/start commands, no disk.
+- Dashboard: <https://dashboard.render.com/web/srv-dbjhuto473hc739t8c9g>. Assigned API URL: <https://tbd-user-api.onrender.com>. This is **not** a successful deployment yet.
+- First deployment `dep-dbjhuu8473hc739t8dog` attempted commit `2c2f6a4c2e644c52cd98e1eafeaf983f20a0dfb5`. Render reported **Build successful**, followed by **update_failed** with runtime `KeyError: 'DATABASE_URL'`.
+- Set nonsecret runtime configuration: Python 3.12.12, intended Supabase project URL, supplied canonical client origin, and exact CORS origins (`http://localhost:5173` plus that client origin). The client origin currently lacks the reviewed join-page deployment.
+- Generated distinct random provisioning/internal-service credentials privately and merged them into Render environment variables. No values were printed, committed, or added to public evidence. Private harness input remains outside Git.
+- Remaining founder configuration: set **DATABASE_URL** and **SUPABASE_SECRET_KEY** directly in this service's Environment page. DATABASE_URL must use `tbd_user_backend` with its own password and Supabase-supplied connection details/TLS. Password/pooler connectivity has not been verified. Also set Settings → Health Check Path to **/healthz**; the direct creation tool does not expose that setting and currently leaves the default TCP probe.
+- After those fields are saved, trigger a fresh deploy, capture its exact SHA, verify `/healthz` and protected API/database behavior, then proceed with Auth templates and the live acceptance matrix. Do not report the failed first attempt or assigned hostname as a live deployment.
+
+No paid resource, replacement Vercel project, schema change, migration reapplication, or live invitation was introduced. Earlier accepted local and hosted database evidence remains preserved.
