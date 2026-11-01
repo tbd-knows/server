@@ -15,7 +15,7 @@ uv run --locked --env-file .env uvicorn tbd_server.main:app --host 127.0.0.1 --p
 
 Apply the reviewed SQL migration explicitly first; startup and requests never migrate a database. `DATABASE_URL` must authenticate as `tbd_user_backend`, using the connection details supplied by Supabase and TLS in production. Do not use the database owner credential for the API. Both API credentials must be distinct random secrets. Public browser keys are insufficient for any internal route.
 
-`GET /healthz` is a side-effect-free process check. `/docs` and `/openapi.json` document request/response schemas and bearer authentication. The service uses at most four concurrent database connections per process, with bounded wait/connect/query timeouts. Run one Uvicorn worker initially.
+Startup checks the actual database role and TLS transport before serving, emitting only sanitized connection evidence. `GET /healthz` is a side-effect-free process check. `/docs` and `/openapi.json` document request/response schemas and bearer authentication. The service uses at most four concurrent database connections per process, with bounded wait/connect/query timeouts. Run one Uvicorn worker initially.
 
 ## Tests
 

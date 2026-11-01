@@ -6,7 +6,7 @@ Updated 2026-11-01. Backend and client reviews passed. [Server PR #2](https://gi
 | --- | --- |
 | GitHub | Both implementation reviews passed; use the existing server/client branches for integration, then merge both only after acceptance. |
 | Supabase | Use existing `tbd-v1`, reference `xclftpnjwrmakooaaxik`. Reviewed migration applied at version `20261101103939`. Private schema/RLS/grants and browser Data API denial verified. Public signup is now verified disabled (`disable_signup=true`, email still enabled). Founder reports Gmail SMTP saved directly; delivery/template/URL configuration remains unverified. Never change old `aptknows-auth`. |
-| Render | Verified TBD workspace. Created free Python service `srv-dbjhuto473hc739t8c9g` from the existing backend branch with auto-deploy off. Build succeeded; startup is blocked by missing `DATABASE_URL`. Details below. Inspect workspace `tea-das0s48u01pc73e7km90` before provisioning/reusing one service. |
+| Render | Verified TBD workspace. Created free Python service `srv-dbjhuto473hc739t8c9g` from the existing backend branch with auto-deploy off. Live at `https://tbd-user-api.onrender.com`, commit `a9045c8d4ef369188581c35d2fe21004aa80590f`. Actual startup SQL confirms backend role, TLS and session pooling. Inspect workspace `tea-das0s48u01pc73e7km90` before provisioning/reusing one service. |
 | Vercel | Existing imported `client` project in `robel-kebedes-projects`. Connected account sees the supplied team but `client` returns 404 and is absent from its project list. Founder confirmed the existing Dashboard URL and production domain; connector access still returns 404. A Vercel team-consent link was requested; no replacement project created. |
 | Email | Founder reports Gmail SMTP saved directly; actual delivery remains unverified. Never enter the App Password into chat, Git, or the browser application. |
 
@@ -60,7 +60,7 @@ Start command:
 .venv/bin/uvicorn tbd_server.main:app --host 0.0.0.0 --port $PORT --workers 1 --no-access-log
 ```
 
-The blueprint points to `main`; deploy the reviewed merged implementation, or explicitly select the implementation branch for an authorized review deployment. Apply the migration first, then set all required environment values and deploy compatible code. `/healthz` checks process startup only; verify a protected API request and database behavior separately. Assigned API URL: `https://tbd-user-api.onrender.com` (not healthy/live yet). Use this URL in client configuration only when the service is verified.
+The blueprint points to `main`; deploy the reviewed merged implementation, or explicitly select the implementation branch for an authorized review deployment. Apply the migration first, then set all required environment values and deploy compatible code. `/healthz` checks process startup only; verify a protected API request and database behavior separately. Verified API URL: `https://tbd-user-api.onrender.com`. Use this API origin in the client deployment.
 
 ## Gmail SMTP and join templates (TBD-16)
 
@@ -121,7 +121,21 @@ The bundled Render routes still report `-32001 Unknown tool`. The authenticated 
 - First deployment `dep-dbjhuu8473hc739t8dog` attempted commit `2c2f6a4c2e644c52cd98e1eafeaf983f20a0dfb5`. Render reported **Build successful**, followed by **update_failed** with runtime `KeyError: 'DATABASE_URL'`.
 - Set nonsecret runtime configuration: Python 3.12.12, intended Supabase project URL, supplied canonical client origin, and exact CORS origins (`http://localhost:5173` plus that client origin). The client origin currently lacks the reviewed join-page deployment.
 - Generated distinct random provisioning/internal-service credentials privately and merged them into Render environment variables. No values were printed, committed, or added to public evidence. Private harness input remains outside Git.
-- Remaining founder configuration: set **DATABASE_URL** and **SUPABASE_SECRET_KEY** directly in this service's Environment page. DATABASE_URL must use `tbd_user_backend` with its own password and Supabase-supplied connection details/TLS. Password/pooler connectivity has not been verified. Also set Settings → Health Check Path to **/healthz**; the direct creation tool does not expose that setting and currently leaves the default TCP probe.
+- At the first failed deployment, founder configuration still required setting **DATABASE_URL** and **SUPABASE_SECRET_KEY** directly in this service's Environment page. DATABASE_URL must use `tbd_user_backend` with its own password and Supabase-supplied connection details/TLS. Password/pooler connectivity has not been verified. Also set Settings → Health Check Path to **/healthz**; the direct creation tool does not expose that setting and currently leaves the default TCP probe.
 - After those fields are saved, trigger a fresh deploy, capture its exact SHA, verify `/healthz` and protected API/database behavior, then proceed with Auth templates and the live acceptance matrix. Do not report the failed first attempt or assigned hostname as a live deployment.
 
 No paid resource, replacement Vercel project, schema change, migration reapplication, or live invitation was introduced. Earlier accepted local and hosted database evidence remains preserved.
+
+
+### Live backend and verified runtime connection
+
+Founder saved the database and Supabase credentials directly in Render and set `/healthz`. Service settings confirm the health path and existing implementation branch; automatic deploys remain off.
+
+- First successful live backend was commit `61cf323792307fab3c1eb0ef0dd8d1420fbbb1ab` (deploy `dep-dbji6iqjnfac7382ndkg`). `/healthz` returned 200.
+- Current verified live deployment: **`dep-dbji8de7bikc73fhmeh0`**, commit **`a9045c8d4ef369188581c35d2fe21004aa80590f`**, URL <https://tbd-user-api.onrender.com>.
+- Integration added a small startup database check on the existing backend branch. It executes `SELECT current_user`, verifies `tbd_user_backend`, rejects a remote connection without TLS, and logs only role/TLS/session-pooler booleans. GET `/healthz` stays fast and side-effect free. No credential or hostname is logged.
+- Actual Render startup evidence at 2026-11-01T11:37:01Z: `role=tbd_user_backend`, `tls=true`, `session_pooler=true`. The pooler result checks the configured Supabase pooler endpoint and session port, together with successful SQL and libpq TLS evidence. This is runtime proof, not a URI-only claim.
+- The startup change justified local regression checks: `uv run --locked ruff check src tests scripts`, format, and `uv run --locked python scripts/run_database_tests.py -q`: **64 passed, zero skipped**, with the known upstream deprecation warning. New real-database cases verify actual backend-role detection and rejection of owner credentials.
+- A controlled hosted API harness passed synthetic business seeding/retry/contact-free behavior, sender resolution, invalid credentials and cross-user denial, protected profile fields, concurrent revision conflicts, save ID retry/no revision increment/changed-content conflict, missing/foreign edit rejection, concurrent default changes, default replacement/deletion, clearing, and exact CORS allow/deny. Synthetic saved addresses were removed and fixture display name restored. Two explicitly named synthetic seed Users remain for acceptance reuse; no real contacts were used for these fixtures. This does not establish email-backed joining.
+
+Current founder actions are Vercel team-access approval and saving the approved Auth URLs/Invite/Magic Link templates directly in Supabase (or providing local CLI management authentication through its secure login). Render/database credentials and public signup are resolved. Do not request those again without a new error. No live email is sent until the correct templates and reviewed client deployment are verified. Inbox delivery, both real join types, unapproved verified identity, and hosted token-consumption/reload/recovery scenarios remain pending.
