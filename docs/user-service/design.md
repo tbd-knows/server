@@ -8,7 +8,7 @@ A founder submits an approved waitlist entry. TBD emails a Join TBD link. Openin
 
 The service also owns saved profile details and addresses. Messaging and Agent are subsequent implementations; this service provides their tested integration contract.
 
-Status: implementation proposal for founder review. The high-level service boundaries are approved. This document supplies the implementation details. See [the drawing](architecture.excalidraw) and [setup status](setup.md).
+Status: User service v1 implementation and final acceptance passed. See [the drawing](architecture.excalidraw) and [setup status](setup.md).
 
 ## Background Information / Context
 
@@ -83,7 +83,7 @@ Do not add a generic profile JSON blob. Addresses are the first additional profi
 - Enforce at most one default with a partial unique index. Address mutations lock the owning User row; switching defaults is one transaction.
 - Removing the default with other addresses remaining requires a replacement address ID in the same operation. Removing the last address leaves no default.
 - Each mutation takes the current `revision`, validates it under the row lock, and increments it once. A stale revision returns 409 for reread/clarification. Do not blindly replay a conflicting user instruction.
-- A save accepts a caller-generated address ID. Repeating that ID with the same content returns the existing address; a different payload conflicts. After an uncertain edit/delete, reread before deciding whether another write is needed.
+- A save accepts a caller-generated address ID. The PUT body uses `operation: "save"` (default) for idempotent creation and `operation: "edit"` for an explicit revision-checked edit. Repeating that ID with the same content returns the existing address; a different payload conflicts. After an uncertain edit/delete, reread before deciding whether another write is needed.
 - Saving requires clear intent to retain/reuse. Gift or purchase-only addresses remain task data. Saving is not permission to disclose to a seller or delivery provider.
 - Clearing removes the saved value; future Agent work must not silently restore it from conversation history. This service does not delete or rewrite orders or Agent memory.
 
@@ -115,7 +115,7 @@ Return 401 for missing/invalid credentials, 403 for an unauthorized operation, 4
 - Keep the page free of analytics, third-party scripts, token logging, and private data before verification. Use no-referrer/no-store behavior and remove the URL fragment before network calls. Disable email link tracking in the sending provider.
 - CORS allowlists the local join origin and deployed production origin. Do not allow every preview origin to access the live project; previews use local/mocked Auth unless explicitly configured.
 - Keep Supabase secrets, SQL credentials, and internal tokens out of browser builds and Git. Browser configuration contains only API URL, Supabase URL, and publishable key.
-- Use parameterized SQL and a backend-only database role with access to this service's schema. Do not expose application tables through the Supabase Data API or add public RLS policies for convenience.
+- Use parameterized SQL and a backend-only database role with access to this service's schema. Do not expose application tables through the Supabase Data API or add public RLS policies for convenience. The backend role has schema-scoped grants and RLS policies; browser roles have no policies or grants.
 - Use SQL migrations committed under `supabase/migrations/`; create/generate them using the Supabase CLI workflow. Apply them explicitly before deploying compatible application code. No migration-on-request or destructive production reset.
 - Pin dependencies and commit lockfiles. Test real database transactions/constraints as well as API behavior. Avoid mock-only integration proof.
 - Both repositories are public. Commit only code, fake fixtures, documentation, and secret-free templates. No real waitlist records, addresses, tokens, or email screenshots.
@@ -141,7 +141,7 @@ Founder commands `invite`, `resend`, and `seed-business` read JSON from a file/s
 2. Client: join page, Supabase templates/SMTP setup instructions, and Vercel configuration. Target the backend contract rather than duplicate its logic.
 3. Integration: configure Gmail SMTP and Auth settings, deploy both repos, and exercise the matrix below. Record evidence on the parent issue.
 
-Work: [TBD-13 parent](https://linear.app/apt-knows/issue/TBD-13), then [TBD-14 backend](https://linear.app/apt-knows/issue/TBD-14), [TBD-15 join page](https://linear.app/apt-knows/issue/TBD-15), and [TBD-16 deployed proof](https://linear.app/apt-knows/issue/TBD-16). Each child is one substantial deliverable; do not split into endpoint-level tickets. Implementation starts after review of the planning PRs.
+Work: [TBD-13 parent](https://linear.app/apt-knows/issue/TBD-13), then [TBD-14 backend](https://linear.app/apt-knows/issue/TBD-14), [TBD-15 join page](https://linear.app/apt-knows/issue/TBD-15), and [TBD-16 deployed proof](https://linear.app/apt-knows/issue/TBD-16). Each child is one substantial deliverable; do not split into endpoint-level tickets. Both planning PRs are merged; implementation follows the approved contract.
 
 ### Required verification
 
