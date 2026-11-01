@@ -1,11 +1,15 @@
 import os
+import json
 
 from .user.api import create_app
 from .user.auth import Auth
 from .user.store import Store
 
+store = Store(os.environ["DATABASE_URL"])
+print(json.dumps({"database_connection_verified": store.verify_connection()}), flush=True)
+
 app = create_app(
-    Store(os.environ["DATABASE_URL"]),
+    store,
     Auth(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SECRET_KEY"], os.environ["JOIN_SITE_URL"]),
     os.environ["PROVISIONING_TOKEN"],
     os.environ["INTERNAL_SERVICE_TOKEN"],

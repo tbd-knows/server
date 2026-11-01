@@ -44,6 +44,19 @@ class Store:
         finally:
             self.connections.release()
 
+    def verify_connection(self):
+        """Prove runtime SQL identity and transport without exposing connection secrets."""
+        with self.transaction() as cur:
+            role = cur.execute("SELECT current_user AS role").fetchone()["role"]
+            info = cur.connection.info
+            tls = bool(cur.connection.pgconn.ssl_in_use)
+            session_pooler = info.host.endswith(".pooler.supabase.com") and info.port == 5432
+            if role != "tbd_user_backend":
+                raise Problem(503, "Database must authenticate as tbd_user_backend")
+            if not tls and info.host not in ("localhost", "127.0.0.1", "/private/tmp"):
+                raise Problem(503, "Remote database connection requires TLS")
+        return {"role": role, "tls": tls, "session_pooler": session_pooler}
+
     @staticmethod
     def lock_contacts(cur, email, phone):
         # Same order for invitations and seeds, including absent-row races.

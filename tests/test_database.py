@@ -457,3 +457,13 @@ def test_duplicate_user_contacts_and_auth_foreign_key(store):
                 "INSERT INTO user_service.invitations (name,phone,email,type,auth_user_id) VALUES ('Example','+12125550192','missing-auth@example.test','individual',%s)",
                 (uuid4(),),
             )
+
+
+def test_connection_check_queries_actual_backend_role(store):
+    assert store.verify_connection() == {"role": "tbd_user_backend", "tls": False, "session_pooler": False}
+
+
+def test_connection_check_rejects_owner_credential(store):
+    with pytest.raises(Problem) as error:
+        Store(os.environ["TEST_DATABASE_URL"]).verify_connection()
+    assert error.value.status == 503
