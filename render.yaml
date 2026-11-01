@@ -1,0 +1,29 @@
+# Deployment preparation only. Inspect the supplied workspace before creating a service.
+services:
+  - type: web
+    name: tbd-user-api
+    runtime: python
+    plan: free
+    repo: https://github.com/tbd-knows/server
+    branch: main
+    autoDeployTrigger: "off"
+    buildCommand: pip install uv==0.13.6 && uv sync --locked --no-dev
+    startCommand: .venv/bin/uvicorn tbd_server.main:app --host 0.0.0.0 --port $PORT --workers 1 --no-access-log
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.12
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        value: https://xclftpnjwrmakooaaxik.supabase.co
+      - key: SUPABASE_SECRET_KEY
+        sync: false
+      - key: PROVISIONING_TOKEN
+        sync: false
+      - key: INTERNAL_SERVICE_TOKEN
+        sync: false
+      - key: JOIN_SITE_URL
+        sync: false
+      - key: ALLOWED_WEB_ORIGINS
+        sync: false
