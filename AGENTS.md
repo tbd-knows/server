@@ -7,3 +7,5 @@
 - Implement server-side identity and own-user checks. LLM/tool arguments cannot establish identity or override account contacts.
 - Verify real database constraints/transactions and meaningful failure paths. Follow the Supabase skill and current CLI help for migrations.
 - Keep changes reviewable and follow the issue's acceptance criteria. This handoff does not authorize unrelated platform scaffolding.
+
+- Do not merge implementation PRs until Robel Bruk and Robel Kebede have both reviewed and explicitly approved merging. Agent technical acceptance is not founder approval.
