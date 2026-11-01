@@ -1,6 +1,7 @@
 """Transactional persistence. Every mutation commits before its caller sees success."""
 
 from contextlib import contextmanager
+from threading import BoundedSemaphore
 from uuid import UUID
 
 import psycopg
@@ -18,9 +19,12 @@ class Problem(Exception):
 class Store:
     def __init__(self, database_url: str):
         self.database_url = database_url
+        self.connections = BoundedSemaphore(4)
 
     @contextmanager
     def transaction(self):
+        if not self.connections.acquire(timeout=5):
+            raise Problem(503, "Database busy; retry")
         try:
             with psycopg.connect(self.database_url, row_factory=dict_row, connect_timeout=5) as db:
                 with db.cursor() as cur:
@@ -29,6 +33,22 @@ class Store:
                     yield cur
         except psycopg.errors.UniqueViolation:
             raise Problem(409, "Identity or address conflict") from None
+        except (
+            psycopg.OperationalError,
+            psycopg.InterfaceError,
+            psycopg.errors.QueryCanceled,
+            psycopg.errors.SerializationFailure,
+            psycopg.errors.DeadlockDetected,
+        ):
+            raise Problem(503, "Database unavailable; reread before retrying a mutation") from None
+        finally:
+            self.connections.release()
+
+    @staticmethod
+    def lock_contacts(cur, email, phone):
+        # Same order for invitations and seeds, including absent-row races.
+        for value in sorted(v for v in (email, phone) if v is not None):
+            cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", ("contact:" + value,))
 
     @staticmethod
     def user(cur, user_id, revision=None):
@@ -73,13 +93,18 @@ class Store:
 
     def seed(self, data: Seed):
         with self.transaction() as cur:
+            self.lock_contacts(cur, data.email, data.phone)
             # Serializes retries even when the key does not yet exist.
-            cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (data.seed_key,))
+            cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", ("seed:" + data.seed_key,))
             row = cur.execute("SELECT * FROM users WHERE seed_key=%s", (data.seed_key,)).fetchone()
             if row:
                 if any(row[key] != value for key, value in data.model_dump().items()):
                     raise Problem(409, "Seed details conflict")
             else:
+                if cur.execute(
+                    "SELECT 1 FROM invitations WHERE email=%s OR phone=%s", (data.email, data.phone)
+                ).fetchone():
+                    raise Problem(409, "Contact belongs to an approved invitation")
                 row = cur.execute(
                     "INSERT INTO users (seed_key,name,phone,email,type) VALUES (%s,%s,%s,%s,'business') RETURNING *",
                     (data.seed_key, data.name, data.phone, data.email),
@@ -104,15 +129,19 @@ class Store:
         return row
 
     def save_address(self, user_id, address_id, data: AddressWrite):
-        values = data.model_dump(exclude={"revision"})
+        values = data.model_dump(exclude={"revision", "operation"})
         with self.transaction() as cur:
             user = self.user(cur, user_id)
             old = cur.execute("SELECT * FROM addresses WHERE id=%s", (address_id,)).fetchone()
             if old and old["user_id"] != user_id:
                 raise Problem(404, "Address not found")
             identical = old and all(old[key] == value for key, value in values.items())
-            # An identical retry is a no-op even when its revision predates the save.
-            if not identical:
+            if data.operation == "save" and old and not identical:
+                raise Problem(409, "Address ID already saved with different details")
+            if data.operation == "edit" and not old:
+                raise Problem(404, "Address not found")
+            # Only a save retry is idempotent; uncertain edits require a reread.
+            if data.operation == "edit" or not identical:
                 if user["revision"] != data.revision:
                     raise Problem(409, "Stale revision; reread before changing")
                 params = tuple(values.values())
@@ -170,7 +199,7 @@ class Store:
 
     def approve(self, data):
         with self.transaction() as cur:
-            cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (data.email,))
+            self.lock_contacts(cur, data.email, data.phone)
             row = cur.execute("SELECT * FROM invitations WHERE email=%s", (data.email,)).fetchone()
             if row:
                 if any(row[key] != value for key, value in data.model_dump().items()):

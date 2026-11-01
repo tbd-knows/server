@@ -1,37 +1,82 @@
 # User service setup
 
-Checked 2026-10-31. These are setup facts, not implementation completion.
+Updated 2026-11-01. The backend is implemented and locally tested on [draft PR #2](https://github.com/tbd-knows/server/pull/2); it remains under review. [Current evidence](implementation-status.md) distinguishes local tests from deployment proof.
 
-| Tool | Verified state | Remaining implementation setup |
-| --- | --- | --- |
-| GitHub | Both `tbd-knows/server` and `tbd-knows/client` accessible with write permissions; no application code | Merge planning PRs, then implement the linked Linear work |
-| Supabase | Created fresh `tbd-v1` in the supplied TBD organization; project `xclftpnjwrmakooaaxik`, region `us-east-1`, healthy; no application tables | Store backend secrets securely, apply migrations, disable public signups, configure Auth URLs and templates |
-| Linear | User Service project `P-TBD-2`, TBD team; no prior project issues | Use the parent and three implementation issues linked in the planning PR |
-| Notion | Tech Hub readable; design index created beneath it | Keep links to the canonical GitHub design rather than maintaining a second specification |
-| Render | Supplied TBD workspace accessible; no services returned | Create one Python web service from the implemented server repo; set secrets, port, and `/healthz`; verify live deployment |
-| Vercel | Founder confirms `client` exists and the repo is imported | Verification deferred by founder; not a planning blocker. Check root `apps/web`, Vite, and output `dist` when deployment is needed |
-| Email | Resend access confirmed; founder prefers a personal Gmail sender. Initial setup target is Gmail SMTP directly in Supabase | Requires an eligible Google account with 2-Step Verification, a Google App Password, and manual credential entry in Supabase. SMTP is not configured or tested yet; no emails sent |
-
-The old inactive `aptknows-auth` Supabase project was left unchanged. Fresh-project creation was quoted at $0/month; that quote does not cover future hosting or email usage.
-
-## Configuration ownership
-
-| Location | Required configuration |
+| Component | State / next action |
 | --- | --- |
-| Render only | `DATABASE_URL` (dashboard-supplied connection string), `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, `PROVISIONING_TOKEN`, `INTERNAL_SERVICE_TOKEN`, `JOIN_SITE_URL`, `ALLOWED_WEB_ORIGINS` |
-| Vercel/browser | `VITE_API_URL`, `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY`; all are public values |
-| Supabase Dashboard | Disable public signups and unused providers; set production Site URL; allow only intended local/production redirects; configure Gmail SMTP and both Invite/Magic Link templates |
-| Founder's local environment | API URL and provisioning token for the founder CLI; never commit input files containing real waitlist/seed data |
+| GitHub | Both planning PRs merged; backend implementation is a draft PR. Client implementation has not started. |
+| Supabase | Use existing `tbd-v1`, reference `xclftpnjwrmakooaaxik`. This implementation has not changed its schema or Auth settings. Inspect live resources before applying anything. Never change old `aptknows-auth`. |
+| Render | Deployment prepared in root `render.yaml`; no service created or deployed by this implementation. Inspect workspace `tea-das0s48u01pc73e7km90` before provisioning/reusing one service. |
+| Vercel | Existing imported `client` project in `robel-kebedes-projects`. Deferred until TBD-15/TBD-16; no backend dependency. |
+| Email | Gmail SMTP entry and delivery verification remain founder actions. Never enter the App Password into chat, Git, or the browser application. |
 
-SMTP passwords and the Supabase secret key must never be included in the client repo or client environment. Generate tokens into secret stores, not terminal transcripts. No secret values were collected or committed in this phase.
+## Configuration
 
-## Complete setup during implementation
+| Location | Values |
+| --- | --- |
+| Render only | `DATABASE_URL`, `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, `PROVISIONING_TOKEN`, `INTERNAL_SERVICE_TOKEN`, `JOIN_SITE_URL`, `ALLOWED_WEB_ORIGINS` |
+| Browser/Vercel, later | `VITE_API_URL`, `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY` (all public) |
+| Founder CLI | `TBD_API_URL`, `PROVISIONING_TOKEN`; JSON records outside Git |
+| Supabase Dashboard | SMTP credentials, disabled public signups/unused providers, production Site URL and exact redirect allowlist, Invite and Magic Link templates |
 
-1. Build and test backend locally with disposable data. Create migrations through the Supabase CLI. Use the current CLI's `--help`; do not invent flags or migration names.
-2. Deploy the API in the supplied Render workspace. Apply reviewed migrations explicitly, configure secrets, and verify `/healthz` and an authenticated API call.
-3. Use the existing imported Vercel client project and verify its build settings when deploying the join page. Set the actual production URL in both the API's CORS settings and Supabase Auth settings.
-4. Configure Gmail SMTP in Supabase: host `smtp.gmail.com`, port `587` with STARTTLS, sender name `TBD`, and the founder's Gmail address as sender/username. The founder must enter a Google App Password directly in Supabase; never use or request the normal Google password. SMTP must be tested before declaring delivery ready. Resend remains an alternative once a sending domain is chosen and verified.
-5. Set Invite and Magic Link templates exactly as specified in [design.md](design.md). Disable link tracking. Test scanner GET, actual Join, resend, and a consumed-token/API-failure recovery.
-6. Complete the deployed acceptance matrix and attach sanitized outcomes and commit IDs to Linear. Do not call the service ready while delivery, hosting, or access checks remain unverified.
+`ALLOWED_WEB_ORIGINS` is a comma-separated exact allowlist, initially `http://localhost:5173` plus the production join origin when known. Do not allow every preview deployment. Generate independent random bearer secrets into secret stores. No real secret values belong in `.env.example`.
 
-The Linear agent-context tool was advertised but returned “Tool get_agent_context not found.” No shared field notes were available through it; the design uses this conversation, inspected repositories, and primary product/platform sources.
+## Migration workflow
+
+The release migration is `supabase/migrations/20261101045729_user_service.sql`. It was created with Supabase CLI 2.121.0 using `supabase migration new user_service` after reading current help. Disposable tests apply this exact file. It creates only the three application tables, private-schema grants/RLS policies, and a backend database login with no password. Browser roles have neither schema nor table access. Only `tbd_user_backend` has application DML policies; it cannot read Auth tables or administer schema/roles.
+
+Before deployment, review the file and inspect the live project/schema/migration history. Authenticate the CLI locally; keep database credentials in its secure prompt/secret environment, not command history. Check current CLI help before execution:
+
+```bash
+supabase link --help
+supabase migration list --help
+supabase db push --help
+supabase db advisors --help
+supabase link --project-ref xclftpnjwrmakooaaxik
+supabase migration list --linked
+supabase db push --linked --dry-run
+# After reviewing the target and pending migration:
+supabase db push --linked
+supabase db advisors --linked --type all --fail-on error
+```
+
+Do not reset the live database. Do not apply the migration on API startup or requests. Do not edit an applied migration to repair production; add a new reviewed migration instead.
+
+As the database owner, set the backend role's password out of band. In an interactive `psql` session using a secure owner connection, `\password tbd_user_backend` prompts without putting it in SQL history. Use Supabase's supplied direct or **session-pooler** host/port and custom-role username format, never a guessed host. For session pooling, the username is `tbd_user_backend.<project-ref>`; use the role's password, percent-encoded in a connection URI. Set TLS (`sslmode=require` at minimum) and keep the resulting `DATABASE_URL` only in Render's secret environment. Confirm the deployed connection's `current_user` is `tbd_user_backend` before acceptance. The API does not need direct Auth schema privileges; identity validation uses the Auth SDK.
+
+## Render preparation
+
+`render.yaml` specifies Python 3.12.12, free web compute, repository root, manual deployments, no disk, and `/healthz`. It is preparation, not proof of service creation or a hosted build. Inspect the supplied workspace and existing services first. Do not provision a paid plan to work around failures.
+
+Build command:
+
+```bash
+pip install uv==0.13.6 && uv sync --locked --no-dev
+```
+
+Start command:
+
+```bash
+.venv/bin/uvicorn tbd_server.main:app --host 0.0.0.0 --port $PORT --workers 1 --no-access-log
+```
+
+The blueprint points to `main`; deploy the reviewed merged implementation, or explicitly select the implementation branch for an authorized review deployment. Apply the migration first, then set all required environment values and deploy compatible code. `/healthz` checks process startup only; verify a protected API request and database behavior separately. Production URL is not known yet. Use the actual Render URL in the later client configuration.
+
+## Gmail SMTP and join templates (TBD-16)
+
+The founder enters a Google App Password **directly in Supabase** using an eligible Google account with 2-Step Verification. Use `smtp.gmail.com`, port 587/STARTTLS, sender name `TBD`, and the founder's selected Gmail address as sender/username. Never use the normal Google password or publish the personal address. No Resend or custom sending domain is required.
+
+Disable public signup and unused Auth providers. Set the final Site URL and only the intended production/local redirects. Configure these template links, replacing `JOIN_SITE_URL` with the actual join origin:
+
+```html
+<!-- Invite template -->
+<a href="JOIN_SITE_URL/join#token_hash={{ .TokenHash }}&amp;type=invite">Join TBD</a>
+<!-- Magic Link template for confirmed-identity recovery -->
+<a href="JOIN_SITE_URL/join#token_hash={{ .TokenHash }}&amp;type=email">Join TBD</a>
+```
+
+Disable link tracking. A link GET must not verify a token. After explicit verification, the browser sends only its bearer token to `POST /v1/join`; any supplied signup details are ignored. The backend validates confirmed identity and approved data and returns a committed User response. The page retains its verified session in memory on API failure; after reload/expiry the founder resends. This page is subsequent TBD-15 work.
+
+Only an explicitly authorized recipient may receive a live test message. No recipient is authorized yet. TBD-16 records deployed URLs/SHAs, inbox delivery, both User types, recovery, failures, and browser table denial. Local tests and SMTP acceptance do not establish delivery or full-service completion.
+
+Primary references checked for implementation: [Supabase Python invitations](https://supabase.com/docs/reference/python/auth-admin-inviteuserbyemail), [list users](https://supabase.com/docs/reference/python/auth-admin-listusers), [database roles](https://supabase.com/docs/guides/database/postgres/roles), [Render FastAPI](https://render.com/docs/deploy-fastapi), [Render blueprint](https://render.com/docs/blueprint-spec). The current Supabase changelog was checked; its upcoming HTTP TLS cipher removal requires no special code with the supported Python/OpenSSL stack. Live configuration remains unverified.

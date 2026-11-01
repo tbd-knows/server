@@ -33,7 +33,15 @@ def main():
             timeout=30,
         )
         result = response.json()
-        print(json.dumps({"status": response.status_code, "id": result.get("id"), "outcome": result.get("outcome")}))
+        print(
+            json.dumps(
+                {
+                    "status": response.status_code,
+                    "id": result.get("id"),
+                    "outcome": result.get("outcome") or ("completed" if response.is_success else "failed"),
+                }
+            )
+        )
         return 0 if response.is_success else 1
     except Exception:
         print("Request failed or outcome uncertain; reconcile before retrying.", file=sys.stderr)

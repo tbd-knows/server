@@ -1,6 +1,7 @@
 """Strict inputs shared by the API and founder commands."""
 
 import re
+from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -78,6 +79,7 @@ class Address(Input):
 
 class AddressWrite(Address):
     revision: Revision
+    operation: Literal["save", "edit"] = "save"
 
 
 class DefaultWrite(Input):
@@ -93,3 +95,45 @@ class AddressDelete(Input):
 class Resolve(Input):
     phone: str
     _phone = field_validator("phone")(normalize_phone)
+
+
+class UserResponse(BaseModel):
+    id: UUID
+    name: str
+    type: Literal["individual", "business"]
+    phone: str | None
+    email: str | None
+    revision: int
+    created_at: datetime
+
+
+class AddressResponse(Address):
+    id: UUID
+    user_id: UUID
+    is_default: bool
+
+
+class ProfileResponse(UserResponse):
+    addresses: list[AddressResponse]
+
+
+class DeliveryResponse(BaseModel):
+    id: UUID
+    outcome: Literal["sent", "already joined"]
+
+
+class ErrorResponse(BaseModel):
+    detail: str
+
+
+class DeliveryUncertain(ErrorResponse):
+    id: UUID
+    outcome: Literal["uncertain"] = "uncertain"
+
+
+class ResolvedUser(BaseModel):
+    id: UUID
+
+
+class HealthResponse(BaseModel):
+    status: Literal["ok"]
