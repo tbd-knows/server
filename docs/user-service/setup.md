@@ -5,10 +5,10 @@ Updated 2026-11-01. Backend and client reviews passed. [Server PR #2](https://gi
 | Component | State / next action |
 | --- | --- |
 | GitHub | Both implementation reviews passed; use the existing server/client branches for integration, then merge both only after acceptance. |
-| Supabase | Use existing `tbd-v1`, reference `xclftpnjwrmakooaaxik`. Reviewed migration applied at version `20261101103939`. Private schema/RLS/grants and browser Data API denial verified. Public signup is still enabled and must be disabled. SMTP/template/URL configuration remains unverified. Never change old `aptknows-auth`. |
+| Supabase | Use existing `tbd-v1`, reference `xclftpnjwrmakooaaxik`. Reviewed migration applied at version `20261101103939`. Private schema/RLS/grants and browser Data API denial verified. Public signup is still enabled and must be disabled. Founder reports Gmail SMTP saved directly; delivery/template/URL configuration remains unverified. Never change old `aptknows-auth`. |
 | Render | Deployment prepared in root `render.yaml`; no service created or deployed. Render plugin access is pending. Inspect workspace `tea-das0s48u01pc73e7km90` before provisioning/reusing one service. |
-| Vercel | Existing imported `client` project in `robel-kebedes-projects`. Connected account sees the supplied team but `client` returns 404 and is absent from its project list. Exact project URL/access confirmation is pending; no replacement project created. |
-| Email | Gmail SMTP entry and delivery verification remain founder actions. Never enter the App Password into chat, Git, or the browser application. |
+| Vercel | Existing imported `client` project in `robel-kebedes-projects`. Connected account sees the supplied team but `client` returns 404 and is absent from its project list. Founder confirmed the existing Dashboard URL and production domain; connector access still returns 404. A Vercel team-consent link was requested; no replacement project created. |
+| Email | Founder reports Gmail SMTP saved directly; actual delivery remains unverified. Never enter the App Password into chat, Git, or the browser application. |
 
 ## Configuration
 
@@ -77,7 +77,7 @@ Disable public signup and unused Auth providers. Set the final Site URL and only
 
 Disable link tracking. A link GET must not verify a token. After explicit verification, the browser sends only its bearer token to `POST /v1/join`; any supplied signup details are ignored. The backend validates confirmed identity and approved data and returns a committed User response. The page retains its verified session in memory on API failure; after reload/expiry the founder resends. The reviewed TBD-15 page is implemented on its existing client branch.
 
-Only an explicitly authorized recipient may receive a live test message. No recipient is authorized yet. TBD-16 records deployed URLs/SHAs, inbox delivery, both User types, recovery, failures, and browser table denial. Local tests and SMTP acceptance do not establish delivery or full-service completion.
+Only an explicitly authorized recipient may receive a live test message. The founder has explicitly authorized one individual and one business test recipient, recorded privately outside Git. Use distinct synthetic test phones. TBD-16 records deployed URLs/SHAs, inbox delivery, both User types, recovery, failures, and browser table denial. Local tests and SMTP acceptance do not establish delivery or full-service completion.
 
 Primary references checked for implementation: [Supabase Python invitations](https://supabase.com/docs/reference/python/auth-admin-inviteuserbyemail), [list users](https://supabase.com/docs/reference/python/auth-admin-listusers), [database roles](https://supabase.com/docs/guides/database/postgres/roles), [Render FastAPI](https://render.com/docs/deploy-fastapi), [Render blueprint](https://render.com/docs/blueprint-spec). The current Supabase changelog was checked; its upcoming HTTP TLS cipher removal requires no special code with the supported Python/OpenSSL stack. Live configuration remains unverified.
 
@@ -92,7 +92,20 @@ Checked 2026-11-01 against `tbd-v1` only. No old project, unrelated Vercel proje
 - Hosted rollback-only fake-data SQL passed under `tbd_user_backend`: seed DML, partial unique default constraint, default switch, invalid seed-type rejection and Auth-table read denial. No fixture rows remain. The migration owner's temporary ability to SET ROLE was enabled inside this transaction only and was verified reverted after rollback. This tests SQL privileges/constraints, **not** password/pooler connectivity or deployed API behavior.
 - Security advisor: no findings. Performance advisor: one informational unused `addresses_user_id` index on the newly empty table; retain it for the approved address lookup.
 - Public Auth settings return `disable_signup=false`, with email the only enabled provider. Disable public signup in the Dashboard before acceptance. No invite or magic-link email has been sent.
-- Render access must be connected before workspace inspection/service creation; founder-only Gmail App Password entry, final Auth URLs/templates, server secret configuration, and an explicitly authorized individual/business test recipient pair remain required.
-- Vercel `client` is not visible in the connected account/team. Confirm the exact existing Dashboard project URL and access before configuring/deploying it. The local CLI is not logged in; it was not used to create/link a replacement.
+- Render access must be connected before workspace inspection/service creation; the founder reports SMTP entered and has privately authorized the recipient pair. Final Auth URLs/templates, server secret configuration, and inbox delivery verification remain required.
+- Vercel `client` is not visible in the connected account/team. Founder confirmed `https://vercel.com/robel-kebedes-projects/client` and `https://client-pi-five-28.vercel.app`. The connector still cannot access it; resolve team consent before configuring/deploying it. The local CLI is not logged in; it was not used to create/link a replacement.
 
 No deployed API/join URL exists from this implementation yet. The full hosted API/email/browser acceptance matrix remains pending. Local accepted checks were not rerun merely because cloud access is pending.
+
+
+### Access retry after founder configuration update
+
+Both reviewed application heads remain accepted. The migration and completed database evidence were preserved, not rerun.
+
+- `get_project(idOrName="client", teamId="team_OW5Zi2dAAdSNUopzhMiPbzM5")` still returns **404 / not_found / Project not found**. The domain lookup returns the same error. `authorize_team_access` returned **requires_user_action**, with a single-use ten-minute consent link. Founder action: open the link from the session, approve the existing connection's team access, then confirm completion. A new link is needed if it expires. Do not recreate the project.
+- Render plugin discovery reports **installed=false**, and no Render operations are available in this session. Founder action: install/connect Render and grant access to the supplied workspace. The agent cannot complete that account login on the founder's behalf.
+- Local `supabase whoami --output json` timed out after 12 seconds without a usable identity result. The installed CLI's Auth configuration workflow needs a local login. Founder action: authenticate the CLI directly in a terminal, or toggle public signup off directly in the intended project's Dashboard. No credential should be pasted into chat. A minimal temporary `auth.enable_signup=false` file is prepared outside Git; current CLI help confirms undeclared properties are left unchanged. Review `config diff` before pushing after authentication.
+- Public `/auth/v1/settings` still returned `disable_signup=false`, email enabled. SMTP saving is founder-reported; the public settings endpoint cannot establish SMTP delivery.
+- The supplied production `/join` URL returns **404 / NOT_FOUND** before deployment. The founder reports its current production source as main `705c5dd`; this session has not verified a deployment SHA through Vercel metadata.
+
+No live invitation has been sent. Authorized records are stored only in private temporary input files outside both repositories; addresses and SMTP credentials are excluded from public evidence. No new API or reviewed-branch client deployment exists yet. Credentialed pooler connectivity, templates/redirects/CORS, both real join types and the hosted recovery/access matrix remain pending hosting/Auth access.
