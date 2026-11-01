@@ -8,7 +8,7 @@ A founder submits an approved waitlist entry. TBD emails a Join TBD link. Openin
 
 The service also owns saved profile details and addresses. Messaging and Agent are subsequent implementations; this service provides their tested integration contract.
 
-Status: User service v1 implementation and final acceptance passed. See [the drawing](architecture.excalidraw) and [setup status](setup.md).
+Status: technical verification recorded; founder implementation review and explicit merge approvals remain pending. See [the drawing](architecture.excalidraw) and [setup status](setup.md).
 
 ## Background Information / Context
 
@@ -45,7 +45,7 @@ Use Supabase's Python SDK for Auth and Psycopg for transactional SQL. No ORM, qu
 4. Configure the Invite email template to link to `JOIN_SITE_URL/join#token_hash={{ .TokenHash }}&type=invite`. The Magic Link template uses the same page with `type=email` for recovery/resend after email verification.
 5. GET `/join` and page initialization must neither verify the token nor create a User. The page reads the fragment into memory, removes it from the visible URL, and displays Join TBD. Do not fetch private account details before verification.
 6. On the button press, call Supabase `verifyOtp` with the hash and allowlisted type (`invite` or `email`). Keep the returned session in memory only: disable automatic URL detection, persistent session storage, and automatic refresh.
-7. Send the access token to `POST /v1/join`. The API validates it with Supabase Auth `get_user`; it requires a confirmed email and matches it to the server-owned approved entry. Ignore client-supplied name, phone, type, email, or user ID.
+7. Send the access token to `POST /v1/join`. The API validates it with Supabase Auth `get_user`; it requires a confirmed email and matches it to the server-owned approved entry. Ignore client-supplied name, phone, type, email, or user ID. If delivery preceded storing the Auth ID, bind the confirmed identity to the matching unbound approved invitation within the Join transaction and row lock; reject a different existing binding.
 8. In one database transaction, lock the entry, create the User, and mark the entry with its User ID. A retry with the same verified identity returns that same User. Return success only after commit.
 9. Show “You're in TBD.” Do not claim that messaging, an agent, or purchasing is available yet. Clear the in-memory session after success; do not create a dashboard.
 

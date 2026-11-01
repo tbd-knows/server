@@ -27,7 +27,7 @@ uv run --locked ruff format --check src tests scripts
 uv run --locked python scripts/run_database_tests.py -q
 ```
 
-**Latest result: 64 passed, zero skipped.** Ruff, formatting, and `git diff --check` pass. One upstream Starlette/AnyIO deprecation warning remains; it is not a test failure. An earlier complete run passed 49 tests with zero skips; subsequent constraint, CLI, and access cases expanded the suite. This replaces the initial 16-passed/5-skipped checkpoint.
+**Latest result after R1: 71 passed, zero skipped.** The earlier full 64-test run is a historical checkpoint. Ruff, formatting, and `git diff --check` pass. One upstream Starlette/AnyIO deprecation warning remains; it is not a test failure. An earlier complete run passed 49 tests with zero skips; subsequent constraint, CLI, and access cases expanded the suite. This replaces the initial 16-passed/5-skipped checkpoint.
 
 The runner creates a disposable local PostgreSQL cluster, runs the full suite over TCP, stops it and removes its own artifacts. Application operations run as `tbd_user_backend`, not the database owner. The fixture supplies a minimal local `auth.users` table only for Auth foreign keys; no Supabase project is used/reset.
 
@@ -43,7 +43,7 @@ Evidence includes:
 
 ## Reconciled acceptance matrix
 
-Both live flows passed the recorded technical checks. Founder review of the implementation and evidence boundary is pending. No application-source, migration or joined-account changes were needed for this reconciliation; preserve all existing records.
+Both live flows passed the recorded technical checks. Founder review of the implementation and evidence boundary is pending. The earlier acceptance reconciliation required no application change. R1 now changes only unbound invitation handling inside Join; it has not been deployed. Preserve all live records and the migration.
 
 | Approved scenario | Executed result and evidence | Level |
 | --- | --- | --- |
@@ -85,5 +85,26 @@ A read-only SQL refresh in the new Codex connection failed with `MCP -32001: Unk
 - Backend: <https://tbd-user-api.onrender.com>, deployed code **a9045c8d4ef369188581c35d2fe21004aa80590f**. Actual restricted role/TLS/session-pooler proof and health check accepted.
 - Client: <https://client-pi-five-28.vercel.app/join>, deployed commit **fea2a07898e0a1289eff23746ef907e6710806a4**, Vercel deployment `dpl_G6Zbyvd9nnLJkT7AAb6PcBfLt7zc`. This is the previous merge deployment; reverting Git does not roll back the live site.
 - Supabase migration **20261101103939** is already applied; no reapplication/reset. Public signup disabled; SMTP/inbox delivery verified.
-- Branch documentation/test heads are newer than deployed code. No application behavior changed during reconciliation, so no redeploy was needed.
+- The review branch now includes R1, which binds a verified identity to an unbound approved invitation inside Join. It is locally tested, not deployed; the live backend and client remain at the SHAs above. No deployment or cloud setting was changed.
 - Founder review remains pending. Both main branches have been restored to their pre-implementation trees with forward revert commits; the complete implementation is proposed on `review/user-service-founders`. Render auto-deploy remains off. Vercel's Ignored Build Step is temporarily `exit 0` to preserve the existing live site while Git is reverted. Revisit that temporary setting only after both founders approve the implementation and deployment plan. Default subjects remain a recorded configuration difference.
+
+## PR #3 review fixes — R1 / R2
+
+R1: `Store.join` binds a NULL Auth ID using only the confirmed ID and normalized email provided by `auth.verified_identity`. Binding and User creation/return share the existing transaction and invitation row lock. No nested `bind_auth` transaction, Auth-admin lookup, migration, endpoint or client change was added. Missing approval and different bound identities still fail; uniqueness and rollback remain enforced.
+
+New disposable-database coverage: both User types joining before binding, delayed original binding, two concurrent joins racing delivery binding (one User), identity uniqueness conflict with no partial bind, and binding rollback on failed commit. API/installed-SDK tests pause a delivered invite before its response, join while its binding is NULL, and cover both delayed success and lost Auth response with no founder resend. They retain unconfirmed/mismatched/no-approval denial, approved-details and exactly-one-User assertions.
+
+Commands run from server:
+
+```bash
+PATH=/opt/homebrew/opt/postgresql@17/bin:/opt/homebrew/opt/postgresql@16/bin:$PATH .venv/bin/python scripts/run_database_tests.py -q
+.venv/bin/ruff check src tests scripts
+.venv/bin/ruff format --check src tests scripts
+git diff --check
+```
+
+Results: **71 passed, zero skipped** against fresh disposable PostgreSQL; Ruff/format/whitespace pass. Known upstream Starlette/AnyIO deprecation warning remains. Existing client browser evidence (38 passed/no skips) is reused because browser behavior is unchanged. Recovery after reload/expired sessions remains founder resend.
+
+R2: current deployment statements consistently identify last verified production client `fea2a07898e0a1289eff23746ef907e6710806a4` / `dpl_G6Zbyvd9nnLJkT7AAb6PcBfLt7zc`. Initial `2c5ebe0fa33d929a85cc74d47807199c162aac7a` / `dpl_4umzXBnL2yQFKQAjksSZaFuJEMJJ` checks are explicitly historical. This uses existing verified evidence; no cloud inspection or mutation was needed.
+
+Both PR #3s remain unmerged on `review/user-service-founders`. TBD-13–16 remain In Progress. The reviewer's remaining source coverage and explicit merge approvals from Robel Bruk and Robel Kebede are pending. Existing live deployments, joined accounts, migration, Render auto-deploy off and Vercel Ignored Build Step `exit 0` are preserved.

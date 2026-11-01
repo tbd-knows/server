@@ -12,7 +12,7 @@ Read `AGENTS.md`, `docs/user-service/design.md`, `docs/user-service/setup.md`, a
 - Client: <https://client-pi-five-28.vercel.app/join>, deployed SHA `fea2a07898e0a1289eff23746ef907e6710806a4`, deployment `dpl_G6Zbyvd9nnLJkT7AAb6PcBfLt7zc`. Existing Vercel project `prj_bjfGLoc1nxSWc9rdnZ7CDX7HLSXX`, team `team_OW5Zi2dAAdSNUopzhMiPbzM5`. Ignored Build Step is temporarily `exit 0` to prevent the Git rollback replacing the live site. Revisit only after both founders approve the implementation and deployment plan.
 - Supabase `tbd-v1`, reference `xclftpnjwrmakooaaxik`: migration `20261101103939_user_service` already applied. Do not reapply/reset it or touch `aptknows-auth`. Public signup is disabled; SMTP and correct email fragment links were verified.
 - Exactly one individual and one business User were proven against their approved details and original Auth identities. Preserve both accounts. Default email subjects remain a documented configuration difference.
-- Recorded suites: 64 backend tests and 38 Chromium/WebKit browser tests, zero skips; one strengthened real-database HTTP test also passed. No application code changes are introduced by this rollback/review handoff. Re-run only when a new change or concrete review concern justifies it.
+- Recorded suites after R1: 71 backend tests, zero skips; existing 38 Chromium/WebKit browser tests, zero skips, reused because the client is unchanged. R1 changes verified Join to bind a missing Auth ID in its existing transaction; the review fix is not deployed. See implementation-status.md for commands, coverage and R2 documentation reconciliation.
 
 ## Review and access
 

@@ -109,7 +109,7 @@ def test_browser_privileges_denied(store):
 _fixture_phones = count(110)
 
 
-def approved(store, *, type="individual", phone=None):
+def approved(store, *, type="individual", phone=None, bind=True):
     from tbd_server.user.models import Invitation
 
     identity = uuid4()
@@ -119,7 +119,8 @@ def approved(store, *, type="individual", phone=None):
     entry = store.approve(Invitation(name="Approved Example", phone=phone, email=email, type=type))
     with psycopg.connect(os.environ["TEST_DATABASE_URL"]) as db:
         db.execute("INSERT INTO auth.users VALUES (%s)", (identity,))
-    store.bind_auth(entry["id"], identity)
+    if bind:
+        store.bind_auth(entry["id"], identity)
     return entry, identity
 
 
@@ -394,8 +395,9 @@ def test_http_invite_join_retry_failure_recovery_and_profile_contract(store, mon
         assert cur.execute("SELECT count(*) AS n FROM users WHERE auth_user_id=%s", (identity,)).fetchone()["n"] == 1
 
 
-def test_failed_join_rolls_back_user_insert(store, monkeypatch):
-    entry, identity = approved(store)
+@pytest.mark.parametrize("bind", [True, False])
+def test_failed_join_rolls_back_user_insert(store, monkeypatch, bind):
+    entry, identity = approved(store, bind=bind)
     from contextlib import contextmanager
 
     original = store.transaction
@@ -412,6 +414,7 @@ def test_failed_join_rolls_back_user_insert(store, monkeypatch):
             store.join(identity, entry["email"])
         assert error.value.status == 503
     assert store.invitation(entry["id"])["joined_user_id"] is None
+    assert store.invitation(entry["id"])["auth_user_id"] == (identity if bind else None)
     with store.transaction() as cur:
         assert cur.execute("SELECT 1 FROM users WHERE auth_user_id=%s", (identity,)).fetchone() is None
     assert store.join(identity, entry["email"])["email"] == entry["email"]
@@ -473,3 +476,134 @@ def test_connection_check_rejects_owner_credential(store):
     with pytest.raises(Problem) as error:
         Store(os.environ["TEST_DATABASE_URL"]).verify_connection()
     assert error.value.status == 503
+
+
+@pytest.mark.parametrize("kind", ["individual", "business"])
+def test_join_binds_delivered_unbound_invitation(store, kind):
+    entry, identity = approved(store, type=kind, bind=False)
+    joined = store.join(identity, entry["email"])
+    assert joined["auth_user_id"] == identity
+    assert all(joined[key] == entry[key] for key in ("name", "email", "phone", "type"))
+    assert store.invitation(entry["id"])["auth_user_id"] == identity
+    # A delayed delivery response and another Join cannot replace the identity/User.
+    store.bind_auth(entry["id"], identity)
+    assert store.join(identity, entry["email"])["id"] == joined["id"]
+    with pytest.raises(Problem) as error:
+        store.join(uuid4(), entry["email"])
+    assert error.value.status == 403
+    with store.transaction() as cur:
+        assert cur.execute("SELECT count(*) AS n FROM users WHERE auth_user_id=%s", (identity,)).fetchone()["n"] == 1
+
+
+def test_concurrent_join_and_delivery_binding(store):
+    from threading import Barrier
+
+    entry, identity = approved(store, bind=False)
+    start = Barrier(3)
+
+    def join():
+        start.wait(timeout=5)
+        return store.join(identity, entry["email"])
+
+    def bind():
+        start.wait(timeout=5)
+        store.bind_auth(entry["id"], identity)
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        first, second, binding = executor.submit(join), executor.submit(join), executor.submit(bind)
+        first, second = first.result(timeout=15), second.result(timeout=15)
+        binding.result(timeout=15)
+    assert first["id"] == second["id"]
+    saved = store.invitation(entry["id"])
+    assert saved["auth_user_id"] == identity and saved["joined_user_id"] == first["id"]
+    with store.transaction() as cur:
+        assert cur.execute("SELECT count(*) AS n FROM users WHERE auth_user_id=%s", (identity,)).fetchone()["n"] == 1
+
+
+def test_unbound_join_identity_uniqueness_rolls_back(store):
+    original, identity = approved(store)
+    entry, _ = approved(store, bind=False)
+    with pytest.raises(Problem) as error:
+        store.join(identity, entry["email"])
+    assert error.value.status == 409
+    assert store.invitation(entry["id"])["auth_user_id"] is None
+    assert store.invitation(entry["id"])["joined_user_id"] is None
+    assert store.invitation(original["id"])["auth_user_id"] == identity
+    with store.transaction() as cur:
+        assert cur.execute("SELECT 1 FROM users WHERE auth_user_id=%s", (identity,)).fetchone() is None
+
+
+@pytest.mark.parametrize("lost_response", [False, True])
+def test_http_join_during_delivery_without_founder_resend(store, lost_response):
+    from threading import Event
+
+    import httpx
+    from fastapi.testclient import TestClient
+    from test_auth import auth_user
+    from tbd_server.user.api import create_app
+    from tbd_server.user.auth import Auth
+
+    user = auth_user(confirmed=False, email=f"{uuid4()}@example.test")
+    identity = UUID(user["id"])
+    with psycopg.connect(os.environ["TEST_DATABASE_URL"]) as db:
+        db.execute("INSERT INTO auth.users VALUES (%s)", (identity,))
+    delivered, finish_delivery = Event(), Event()
+    sends = []
+
+    def handler(request):
+        if request.url.path == "/auth/v1/admin/users":
+            return httpx.Response(200, json={"users": []})
+        if request.url.path == "/auth/v1/invite":
+            sends.append(request.url.path)
+            delivered.set()
+            assert finish_delivery.wait(timeout=10)
+            if lost_response:
+                raise httpx.ReadTimeout("response lost after delivery", request=request)
+            return httpx.Response(200, json=user)
+        if request.url.path == "/auth/v1/user":
+            assert request.headers["authorization"] == "Bearer fake-verified-session"
+            return httpx.Response(200, json=user)
+        pytest.fail(f"Unexpected Auth operation: {request.url.path}")
+
+    auth = Auth(
+        "https://auth.example.test",
+        "sb_secret_fake",
+        "https://join.example.test",
+        transport=httpx.MockTransport(handler),
+    )
+    data = {
+        "name": "Approved Delivered Example",
+        "email": user["email"],
+        "phone": f"+1212555{next(_fixture_phones):04d}",
+        "type": "individual",
+    }
+    with TestClient(create_app(store, auth, "provisioning-test", "internal-test", [])) as client:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            sending = executor.submit(
+                client.post, "/internal/invitations", json=data, headers={"Authorization": "Bearer provisioning-test"}
+            )
+            try:
+                assert delivered.wait(timeout=5)
+                with store.transaction() as cur:
+                    entry = cur.execute("SELECT * FROM invitations WHERE email=%s", (user["email"],)).fetchone()
+                assert entry["auth_user_id"] is None and entry["joined_user_id"] is None
+                headers = {"Authorization": "Bearer fake-verified-session"}
+                assert client.post("/v1/join", headers=headers).status_code == 403
+                user["email_confirmed_at"] = "2026-01-01T00:00:00Z"
+                response = client.post(
+                    "/v1/join",
+                    headers=headers,
+                    json={"id": str(uuid4()), "email": "other@example.test", "type": "business"},
+                )
+                assert response.status_code == 200
+                joined = response.json()
+                assert all(joined[key] == data[key] for key in ("name", "phone", "email", "type"))
+                assert client.post("/v1/join", headers=headers).json()["id"] == joined["id"]
+            finally:
+                finish_delivery.set()
+            assert sending.result(timeout=5).status_code == (503 if lost_response else 200)
+        assert sends == ["/auth/v1/invite"]  # No founder resend or extra email.
+    saved = store.invitation(entry["id"])
+    assert saved["auth_user_id"] == identity and str(saved["joined_user_id"]) == joined["id"]
+    with store.transaction() as cur:
+        assert cur.execute("SELECT count(*) AS n FROM users WHERE auth_user_id=%s", (identity,)).fetchone()["n"] == 1

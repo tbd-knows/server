@@ -129,7 +129,11 @@ class Store:
             entry = cur.execute("SELECT * FROM invitations WHERE email=%s FOR UPDATE", (email,)).fetchone()
             if entry is None:
                 raise Problem(403, "No approved invitation")
-            if entry["auth_user_id"] != auth_id:
+            if entry["auth_user_id"] is None:
+                # Delivery can precede the sender persisting the Auth response.
+                # The API supplies only a confirmed identity from verified_identity.
+                cur.execute("UPDATE invitations SET auth_user_id=%s WHERE id=%s", (auth_id, entry["id"]))
+            elif entry["auth_user_id"] != auth_id:
                 raise Problem(403, "Invitation identity mismatch")
             if entry["joined_user_id"]:
                 row = cur.execute("SELECT * FROM users WHERE id=%s", (entry["joined_user_id"],)).fetchone()
