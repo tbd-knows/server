@@ -2,6 +2,8 @@
 
 Python 3.12/FastAPI User service for TBD v1. [Approved design](docs/user-service/design.md), [editable architecture](docs/user-service/architecture.excalidraw), [setup/deployment](docs/user-service/setup.md), and [verification status](docs/user-service/implementation-status.md).
 
+**User service v1 is implemented, merged and production-verified (2026-11-03).** The verification status records fresh hosted results, earlier controlled coverage and the cold-start/retry caveat. The contract is ready for Messaging integration; Messaging/Agent themselves are subsequent work.
+
 ## Install and run
 
 Install Python 3.12 and uv 0.13.6, then run these commands from this repository:

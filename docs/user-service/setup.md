@@ -1,25 +1,29 @@
 # User service setup
 
-Updated 2026-11-01. **Technical verification complete; founder review pending.** Both previous implementation merges were reverted at the founder's request. Review the fresh PRs from `review/user-service-founders` in each repository. Robel Bruk and Robel Kebede must both review and explicitly approve merging. [Current evidence](implementation-status.md) distinguishes local tests from deployment proof.
+Updated 2026-11-03. **User service v1 is implemented, merged, deployed and verified.** [Implementation status and acceptance evidence](implementation-status.md) is the completion record; [design.md](design.md) defines the supported scope.
 
-| Component | State / next action |
+## Verified production configuration
+
+| Component | Verified state |
 | --- | --- |
-| GitHub | Both premature implementation merges reverted on main. Fresh implementation PRs await Robel Bruk and Robel Kebede review; no merge authorization. |
-| Supabase | Use existing `tbd-v1`, reference `xclftpnjwrmakooaaxik`. Reviewed migration applied at version `20261101103939`. Private schema/RLS/grants and browser Data API denial verified. Public signup is verified disabled (`disable_signup=true`, email still enabled). SMTP inbox delivery and correct fragment links pass; both authorized accounts have joined with original Auth identities. Default subjects are a nonblocking difference. Never change old `aptknows-auth`. |
-| Render | Verified TBD workspace. Created free Python service `srv-dbjhuto473hc739t8c9g` from the existing backend branch with auto-deploy off. Live at `https://tbd-user-api.onrender.com`, commit `a9045c8d4ef369188581c35d2fe21004aa80590f`. Actual startup SQL confirms backend role, TLS and session pooling. Inspect workspace `tea-das0s48u01pc73e7km90` before provisioning/reusing one service. |
-| Vercel | Existing `client` project serves <https://client-pi-five-28.vercel.app/join> from merge commit `fea2a07898e0a1289eff23746ef907e6710806a4`, deployment `dpl_G6Zbyvd9nnLJkT7AAb6PcBfLt7zc`. Ignored Build Step is temporarily `exit 0` so Git rollback preserves the current live site. Revisit after both founders approve review and deployment. No replacement project created. |
-| Email | Actual inbox delivery verified for both authorized test aliases, including fresh resends. Correct fragment destinations and both join/recovery flows verified. Only the subject text differs from the configured expectation. Never enter the App Password into chat, Git, or the browser application. |
+| GitHub | Server PR #3 and client PR #3 are merged. The verified application release is server `9d69ab1776af65147fe5237b4f1abb5620a2113d` and client `f04707d8b46c201db82bbb724511c02c0c9734c8`; later documentation commits do not change that application source. |
+| Supabase | Existing `tbd-v1` / `xclftpnjwrmakooaaxik`; migration `20261101103939` already applied. Private schema/RLS/backend grants and browser denial verified. Public signup/unused providers disabled; SMTP delivery and invitation/recovery links verified. Preserve accounts and the migration; do not modify old `aptknows-auth`. |
+| Render | Existing service `srv-dbjhuto473hc739t8c9g` in TBD workspace `tea-das0s48u01pc73e7km90`; <https://tbd-user-api.onrender.com>. Tracks main with auto-deploy off. Verified release deployment `dep-dbjrrsvlk1mc73a4jgog`; startup verified restricted role/TLS/session pooling. |
+| Vercel | Existing `client` project `prj_bjfGLoc1nxSWc9rdnZ7CDX7HLSXX` in team `team_OW5Zi2dAAdSNUopzhMiPbzM5`; <https://client-pi-five-28.vercel.app/join>. Root `apps/web`, Node 22/Vite, npm ci/build, dist. Verified application deployment `dpl_2D14St9M8zMVY4Myg4FxThTh6CGU`; the temporary rollback build pause was removed before this release. |
+| Email | Gmail SMTP sends the correct direct `/join` fragment links. Prior individual/business recovery and fresh individual inbox receipt/Join are verified. Default subject text remains a nonblocking difference. Keep SMTP credentials out of chat, Git and browser builds. |
+
+Deployment IDs/SHAs identify the application release verified on 2026-11-03; documentation-only commits or equivalent builds may follow. Inspect live metadata before future operational changes.
 
 ## Configuration
 
 | Location | Values |
 | --- | --- |
 | Render only | `DATABASE_URL`, `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, `PROVISIONING_TOKEN`, `INTERNAL_SERVICE_TOKEN`, `JOIN_SITE_URL`, `ALLOWED_WEB_ORIGINS` |
-| Browser/Vercel, later | `VITE_API_URL`, `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY` (all public) |
+| Browser/Vercel | `VITE_API_URL`, `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY` (all public) |
 | Founder CLI | `TBD_API_URL`, `PROVISIONING_TOKEN`; JSON records outside Git |
 | Supabase Dashboard | SMTP credentials, disabled public signups/unused providers, production Site URL and exact redirect allowlist, Invite and Magic Link templates |
 
-`ALLOWED_WEB_ORIGINS` is a comma-separated exact allowlist, initially `http://localhost:5173` plus the production join origin when known. Do not allow every preview deployment. Generate independent random bearer secrets into secret stores. No real secret values belong in `.env.example`.
+`ALLOWED_WEB_ORIGINS` is a comma-separated exact allowlist for the intended local origin and `https://client-pi-five-28.vercel.app`. Do not allow every preview deployment. Generate independent random bearer secrets into secret stores. No real secret values belong in `.env.example`.
 
 ## Migration workflow
 
@@ -44,9 +48,9 @@ Do not reset the live database. Do not apply the migration on API startup or req
 
 As the database owner, set the backend role's password out of band. In an interactive `psql` session using a secure owner connection, `\password tbd_user_backend` prompts without putting it in SQL history. Use Supabase's supplied direct or **session-pooler** host/port and custom-role username format, never a guessed host. For session pooling, the username is `tbd_user_backend.<project-ref>`; use the role's password, percent-encoded in a connection URI. Set TLS (`sslmode=require` at minimum) and keep the resulting `DATABASE_URL` only in Render's secret environment. Confirm the deployed connection's `current_user` is `tbd_user_backend` before acceptance. The API does not need direct Auth schema privileges; identity validation uses the Auth SDK.
 
-## Render preparation
+## Render deployment
 
-`render.yaml` specifies Python 3.12.12, free web compute, repository root, manual deployments, no disk, and `/healthz`. It is preparation, not proof of service creation or a hosted build. Inspect the supplied workspace and existing services first. Do not provision a paid plan to work around failures.
+`render.yaml` documents Python 3.12.12, free web compute, repository root, manual deployments, no disk, and `/healthz`. Reuse the existing service above. Paid plan or deployment-policy changes require a separate operational decision.
 
 Build command:
 
@@ -60,7 +64,7 @@ Start command:
 .venv/bin/uvicorn tbd_server.main:app --host 0.0.0.0 --port $PORT --workers 1 --no-access-log
 ```
 
-The blueprint points to `main`; deploy the reviewed merged implementation, or explicitly select the implementation branch for an authorized review deployment. Apply the migration first, then set all required environment values and deploy compatible code. `/healthz` checks process startup only; verify a protected API request and database behavior separately. Verified API URL: `https://tbd-user-api.onrender.com`. Use this API origin in the client deployment.
+The service and blueprint track `main`; keep Render auto-deploy off. For a future release, review compatibility and any pending migration, configure required values, then explicitly deploy the intended commit. The existing release migration must not be reapplied. `/healthz` checks process startup only; verify a protected API request and database behavior separately. Verified API URL: `https://tbd-user-api.onrender.com`. Use this API origin in the client deployment.
 
 ## Gmail SMTP and join templates (TBD-16)
 
@@ -75,25 +79,17 @@ Disable public signup and unused Auth providers. Set the final Site URL and only
 <a href="JOIN_SITE_URL/join#token_hash={{ .TokenHash }}&amp;type=email">Join TBD</a>
 ```
 
-Disable link tracking. A link GET must not verify a token. After explicit verification, the browser sends only its bearer token to `POST /v1/join`; any supplied signup details are ignored. The backend validates confirmed identity and approved data and returns a committed User response. The page retains its verified session in memory on API failure; after reload/expiry the founder resends. The reviewed TBD-15 page is implemented on its existing client branch.
+Disable link tracking. A link GET must not verify a token. After explicit verification, the browser sends only its bearer token to `POST /v1/join`; any supplied signup details are ignored. The backend validates confirmed identity and approved data and returns a committed User response. The page retains its verified session in memory on API failure; after reload/expiry the founder resends. The TBD-15 page is merged on main and deployed at the production URL above.
 
-Only an explicitly authorized recipient may receive a live test message. The founder has explicitly authorized one individual and one business test recipient, recorded privately outside Git. Use distinct synthetic test phones. TBD-16 records deployed URLs/SHAs, inbox delivery, both User types, recovery, failures, and browser table denial. Local tests and SMTP acceptance do not establish delivery or full-service completion.
+Only an explicitly authorized recipient may receive a live test message. Keep recipient inputs and invitation links outside Git. The completed TBD-16 evidence covers delivery, both User types, recovery, failure cases and browser table denial, with exact live/controlled boundaries in [implementation-status.md](implementation-status.md). SMTP acceptance alone is not inbox proof.
 
 Primary references checked for implementation: [Supabase Python invitations](https://supabase.com/docs/reference/python/auth-admin-inviteuserbyemail), [list users](https://supabase.com/docs/reference/python/auth-admin-listusers), [database roles](https://supabase.com/docs/guides/database/postgres/roles), [Render FastAPI](https://render.com/docs/deploy-fastapi), [Render blueprint](https://render.com/docs/blueprint-spec). The current Supabase changelog was checked; its upcoming HTTP TLS cipher removal requires no special code with the supported Python/OpenSSL stack.
 
 
-## Current deployed acceptance
+## Acceptance and operations
 
-Both authorized real test accounts are joined: exactly one correctly typed application User each, matching approved details and original Auth identities. Preserve those records. Raw MIME confirms correct direct page fragments; business reload/resend recovery and individual same-session Retry with one OTP verification are accepted. Both consumed recovery links were subsequently rejected by production Auth with 403 and no Join API calls.
+The [completion record](implementation-status.md) contains the verified release, 54 fresh hosted API/state checks, individual email/Auth/Join/SQL proof, retained earlier business/recovery evidence, and recorded 71 backend / 38 browser tests. Fresh SQL reads succeeded; all existing accounts and the migration were preserved. Test addresses were cleared.
 
-The [reconciled acceptance matrix](implementation-status.md#reconciled-acceptance-matrix) maps every design row to its exact local, controlled, or live evidence. It also lists the exact failures not separately repeated live. The latest local backend suite passes 71 tests, zero skips, after R1; the prior 64-test backend checkpoint is historical. Existing 38 client browser tests, zero skips, are reused because client behavior is unchanged. One strengthened real-database HTTP integration test passed during the earlier reconciliation. R1 is a later backend behavior fix, tested locally and not deployed.
+Idle-start API responses were observed at about 22.8–32.4 seconds against the client's 15-second timeout, so a first Join may require Retry. Same-session recovery remains in memory; reload or session expiry requires founder resend. Do not reset a joined identity to repeat an onboarding test.
 
-Backend URL: <https://tbd-user-api.onrender.com>, deployed SHA `a9045c8d4ef369188581c35d2fe21004aa80590f`, Render deploy `dep-dbji8de7bikc73fhmeh0`. Runtime SQL proved `current_user=tbd_user_backend`, libpq TLS active and session-pooler endpoint/session port. Client URL: <https://client-pi-five-28.vercel.app/join>, last verified production SHA `fea2a07898e0a1289eff23746ef907e6710806a4`, Vercel deployment `dpl_G6Zbyvd9nnLJkT7AAb6PcBfLt7zc`. The earlier deployment `dpl_4umzXBnL2yQFKQAjksSZaFuJEMJJ` at `2c5ebe0fa33d929a85cc74d47807199c162aac7a` is a **historical verification checkpoint**; its browser evidence remains valid, but it is not the current deployment. Auto-deploy remains off for Render; documentation changes do not redeploy accepted code.
-
-Hosted evidence preserved: migration 20261101103939, private schema RLS/backend-only grants, no browser Data API access (406/PGRST106), backend Auth-table denial, rollback-only constraint checks, restricted password/TLS/session-pooler connectivity, protected hosted API fixture harness for seeding, resolution, revisions, ownership, address/default operations and CORS. Hosted synthetic addresses were removed; two contact-free synthetic seed Users remain. No live reset or migration reapplication occurred.
-
-Received email subjects still use Supabase defaults despite saved `Join TBD` subjects; this is a nonblocking configuration difference. Actual bodies/fragment destinations and inbox delivery are verified. Do not repeat SMTP credential entry or template saves without new evidence.
-
-Previous bundled Render tool-routing errors and Vercel project 404s were resolved through direct MCP/CLI access; no replacement projects were created. The new account's attempted Supabase read-only SQL refresh returned MCP -32001 Unknown tool for supabase.execute_sql; accepted prior SQL evidence remains valid, but further SQL work requires restoring that connection. This is not a new application failure.
-
-Technical checks passed with the documented evidence limits and email-subject difference. Founder implementation review remains pending; the previous claim of founder merge authorization was incorrect. Both main branches are reverted and new review PRs contain the complete implementation. Preserve secrets, CORS, URLs, build/start commands, Render manual deploys, existing accounts and the applied migration. No new fault injection or account reset is authorized by this handoff.
+Default email subjects and the Auth leaked-password-protection advisory remain documented operational notes. Neither prompted credential re-entry, template changes, new infrastructure or a paid-plan change during verification.

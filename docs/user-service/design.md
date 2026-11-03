@@ -8,7 +8,7 @@ A founder submits an approved waitlist entry. TBD emails a Join TBD link. Openin
 
 The service also owns saved profile details and addresses. Messaging and Agent are subsequent implementations; this service provides their tested integration contract.
 
-Status: technical verification recorded; founder implementation review and explicit merge approvals remain pending. See [the drawing](architecture.excalidraw) and [setup status](setup.md).
+Status: **implemented for the approved v1 scope, merged, deployed and verified on 2026-11-03**. See [implementation and acceptance evidence](implementation-status.md), [the drawing](architecture.excalidraw), and the [production runbook](setup.md). Messaging and Agent remain subsequent implementations.
 
 ## Background Information / Context
 

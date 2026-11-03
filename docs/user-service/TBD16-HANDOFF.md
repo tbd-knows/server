@@ -1,23 +1,22 @@
-# User service founder-review handoff — 2026-11-01
+# User service v1 — integration handoff
 
-**Technical verification complete; founder implementation review pending.** The approved design remains the scope. Robel Bruk and Robel Kebede must both review and explicitly approve merging. Previous claims that the founders reviewed the implementation or authorized its merge were incorrect.
+Updated 2026-11-03. **The approved User service v1 is implemented, merged, deployed and verified.** [Implementation status](implementation-status.md) is the canonical evidence record; [setup.md](setup.md) records hosting and operations. The previous review/rollback handoff is historical in Git.
 
-Both premature PR #2 merges have been reverted on main using forward commits. The complete implementation is restored on `review/user-service-founders` in both repositories for fresh PR review. Do not merge, close the implementation issues, or redeploy on the strength of agent technical acceptance.
+## Integration contract
 
-Read `AGENTS.md`, `docs/user-service/design.md`, `docs/user-service/setup.md`, and the [reconciled acceptance matrix](implementation-status.md#reconciled-acceptance-matrix). Preserve its distinction between controlled tests and live proof.
+- A founder can invite an approved individual/small business, resend using the original Auth identity, or seed a business without inventing a contact channel. User creation from an invitation requires explicit Join.
+- The future Messaging backend resolves a trusted sender with `POST /internal/users/resolve`, then supplies the resulting User ID in `X-TBD-User-ID` outside LLM-controlled arguments. Profile/address paths must match that context and use the internal credential.
+- Name correction is the supported profile patch. Identity, type and contacts remain protected. Address saves require reusable-address intent; gift/task-only destinations remain task data. Use current revisions and reread on 409 or uncertain mutations.
+- Address save retries preserve the original ID/revision. Edits can clear optional fields. Default changes and replacement deletion are atomic; foreign addresses are not exposed.
 
-## Preserved state
+Messaging transport, Agent runtime/memory, orders/payments, memberships, mobile and a general dashboard/login are subsequent work. Do not introduce placeholder services or a generic role/token framework for this handoff.
 
-- Backend: <https://tbd-user-api.onrender.com>, deployed SHA `a9045c8d4ef369188581c35d2fe21004aa80590f`. Existing Render service `srv-dbjhuto473hc739t8c9g`, workspace `tea-das0s48u01pc73e7km90`; auto-deploy remains off.
-- Client: <https://client-pi-five-28.vercel.app/join>, deployed SHA `fea2a07898e0a1289eff23746ef907e6710806a4`, deployment `dpl_G6Zbyvd9nnLJkT7AAb6PcBfLt7zc`. Existing Vercel project `prj_bjfGLoc1nxSWc9rdnZ7CDX7HLSXX`, team `team_OW5Zi2dAAdSNUopzhMiPbzM5`. Ignored Build Step is temporarily `exit 0` to prevent the Git rollback replacing the live site. Revisit only after both founders approve the implementation and deployment plan.
-- Supabase `tbd-v1`, reference `xclftpnjwrmakooaaxik`: migration `20261101103939_user_service` already applied. Do not reapply/reset it or touch `aptknows-auth`. Public signup is disabled; SMTP and correct email fragment links were verified.
-- Exactly one individual and one business User were proven against their approved details and original Auth identities. Preserve both accounts. Default email subjects remain a documented configuration difference.
-- Recorded suites after R1: 71 backend tests, zero skips; existing 38 Chromium/WebKit browser tests, zero skips, reused because the client is unchanged. R1 changes verified Join to bind a missing Auth ID in its existing transaction; the review fix is not deployed. See implementation-status.md for commands, coverage and R2 documentation reconciliation.
+## Release and evidence
 
-## Review and access
+Both implementation PR #3s are merged; deployed server includes R1's transactional binding of an unbound approved invitation. A fresh hosted individual flow and 54 API/state checks passed on 2026-11-03. Earlier business Join/recovery, 71 backend tests and 38 browser tests remain evidence at their stated layers. Do not relabel earlier controlled race/failure cases as new hosted injections.
 
-The evidence matrix records successful same-session Retry, reload/resend recovery, consumed-link rejection, ownership, constraints, revisions/defaults, browser database denial and the cases tested with controlled Auth/fault injection rather than independently live.
+## Operational boundaries
 
-Keep invitation links, credentials, recipients, raw MIME and private browser artifacts out of Git, chat and public reports. Historical `/private/tmp/tbd16-integration-data/` and `/private/tmp/tbd16-live-browser.mjs` paths belong to the implementer's machine and may no longer exist. Reconstruct only through authorized scoped access if needed; do not recreate identities or resend messages simply to repeat settled proof.
+Keep Render manual deployment, the applied migration, joined accounts, exact origins and backend-only secrets. A cold first Join may need Retry because idle-start latency can exceed the client's 15-second timeout; reload/expiry uses founder resend. Default email subjects remain a nonblocking difference.
 
-Recheck the exact repository heads and live deployment metadata before reporting them as current. This handoff authorizes review preparation, not another merge or release.
+Use [AGENTS.md](../../AGENTS.md), the [approved design](design.md), and current live deployment metadata before subsequent changes. Do not reset accounts, reapply the migration, send mail to unapproved recipients, or publish real contacts, invitation links, credentials or private browser artifacts.
