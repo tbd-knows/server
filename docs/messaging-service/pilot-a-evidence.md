@@ -34,18 +34,22 @@ Real contacts, native IDs, keys, signatures and raw evidence stay private.
 
 ## Remaining integration contracts
 
-Actual webhook and history both omit `audience` and `attachments`. Missing fields
-are not evidence of direct text. The production adapter still rejects this
-shape; a manual one-off handset check is not an automatic admission rule. Obtain
-provider-backed semantics or positive direct/content metadata, including media,
-group, reaction, edit and unsend evidence, before changing admission.
+Actual webhook and history both omit `audience` and `attachments`. The approved
+plain-text pilot now pairs the confirmed conversation with its approved joined
+phone in private server configuration. With matching shared line and nonempty
+text, this pair supplies the pilot classification needed for webhook and history
+admission. Explicit excluded evidence still wins. This does not establish a
+general provider default; real media/group semantics remain outside this limited
+plain-text pilot. The earlier manual exchange remains separate from hosted backend
+proof; isolated integration tests now exercise this exact sanitized shape through
+the backend's allowlisted path.
 
 The later exact-ID `read` result resolves the earlier unknown send outcome.
 Unknown acceptance alone still does not release a conversation; verified terminal
 history does. No replacement send was made or needed.
 
-Tests exercise these real sanitized shapes: missing classification remains 422;
+Tests exercise these real sanitized shapes: missing classification without a matching configured pair is rejected;
 known-ID unknown remains unresolved; exact-ID read becomes local sent while
 preserving observed read and releases the next queued job. Status reads use GET only. No live API calls occur in
-the suite. Keep PR #5 draft and TBD-18 In Progress. Full hosted proof with two
+the suite. PR #5 proceeds to backend review; TBD-18 stays In Progress until review/integration. Full hosted proof with two
 joined testers follows backend review, explicit founder merge approvals and merge.

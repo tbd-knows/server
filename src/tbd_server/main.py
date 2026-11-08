@@ -13,6 +13,7 @@ messaging = Messaging(
     os.environ["COMMS_WEBHOOK_SECRET"],
     os.environ["COMMS_LINE_E164"],
     os.environ["MESSAGING_ACTIVATED_AT"],
+    pilot_conversations=json.loads(os.environ.get("COMMS_PILOT_CONVERSATIONS", "{}")),
 )
 print(json.dumps({"database_connection_verified": store.verify_connection()}), flush=True)
 

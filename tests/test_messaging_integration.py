@@ -25,6 +25,7 @@ def service():
         "fake-secret",
         "+12125550100",
         "2026-11-08T00:00:00Z",
+        pilot_conversations={"conversation_fake": "+12125550101"},
     )
 
 

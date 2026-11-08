@@ -35,8 +35,10 @@ send one ordinary iMessage if routing consumes the initial text. Read the same
 message using the runtime key with `conversation_id` and `direction=inbound`.
 Compare native `data.message.id`, line, author phone, audience, channel,
 conversation, attachments and original time. Confirm history updates cannot admit
-reactions/edits as new texts. The current adapter uses **documented fields**, not
-yet confirmed against the actual account. Treat fixtures in tests as synthetic.
+reactions/edits as new texts. The captured Pilot A records omit audience and attachments. The approved plain-text
+pilot uses a server-owned conversation/phone allowlist as described below; this
+does not establish general provider omission semantics. Test fixtures distinguish
+synthetic cases from the actual sanitized Pilot A records.
 
 Only after identity/conversation verification, send one explicit iMessage reply
 using that conversation and a saved UUID idempotency key. Record its exact-ID
@@ -130,4 +132,40 @@ the provider message ID, another execution only checks outbound history.
 
 Absent audience/attachments remain absent in the sanitized evidence. Handset
 attestation for this one controlled exchange is not an automatic classification
-rule. The production adapter stays strict pending a provider-backed contract.
+rule by itself. The approved server-owned pair rule below separately authorizes
+the bounded plain-text pilot; it does not establish a provider-wide default.
+
+## Confirmed-conversation plain-text pilot
+
+Set `COMMS_PILOT_CONVERSATIONS` to a JSON object pairing each confirmed one-to-one
+conversation ID with the tester's approved E.164 phone. Example with fake data:
+
+```dotenv
+COMMS_PILOT_CONVERSATIONS='{"conversation_pilot_a":"+12125550101"}'
+```
+
+The real Pilot A pair is prepared privately at
+`/private/tmp/tbd-comms-capture/pilot-conversations.private.json`. Copy that JSON
+into the secure runtime variable during the reviewed rollout, never into Git or
+public issue comments. No key is stored in this mapping. Empty/missing config
+admits no conversations. Add another pair only after its tester phone, completed
+Join and one-to-one thread are confirmed. Real hosting configuration is TBD-20.
+
+Both signed webhook intake and authenticated inbound-history recovery enforce the
+same configured pair and shared line. They still resolve/lock the canonical
+joined User and enforce activation/User-creation times. A missing audience or
+attachments field permits only nonempty text under this explicit pilot rule;
+null/invalid fields fail validation. Explicit shared/group, media, self/outbound,
+non-iMessage, unsend or excluded-event evidence overrides the pair. Media is
+ignored in this text-only pilot. Reactions attached to an original message do not
+become separate inbound messages; history replay preserves already stored text.
+The pilot relies on confirmed threads and plain-text testers, not a provider-wide
+promise about omitted fields. Do not broaden it silently after provider changes.
+
+The real sanitized Pilot A fixture is exercised through signed HTTP intake,
+restricted-role PostgreSQL storage and authenticated fake-provider history:
+exact text + one queued reply, replay with no duplicate, and zero extra rows for
+wrong joined sender/unapproved conversation/line or explicit exclusions. No live
+account is contacted by these tests. Marking PR #5 ready for backend review does
+not authorize merge, production migration or deployment; both founders' explicit
+merge approval remains required and hosted proof remains TBD-20.

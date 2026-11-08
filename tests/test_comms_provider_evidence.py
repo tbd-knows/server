@@ -54,3 +54,24 @@ def test_actual_unknown_outcome_stays_unresolved_and_known_id_is_read_only():
         assert result.state == "uncertain" and result.provider_id == message["id"]
     finally:
         adapter.close()
+
+
+def test_pilot_missing_classification_requires_exact_allowlisted_pair():
+    from copy import deepcopy
+
+    fixture = evidence()
+    original = fixture["history"]
+    allowlist = {original["conversation_id"]: original["author"]["external_id"]}
+    for record in (fixture["webhook"]["data"]["message"], original):
+        event = Comms.normalize(record, record["line_e164"], pilot_conversations=allowlist)
+        assert event.text == original["body"] and not event.unsupported
+        assert Comms.normalize(record, record["line_e164"], pilot_conversations={}) is None
+        changed = deepcopy(record)
+        changed["author"]["external_id"] = "+12125550999"
+        assert Comms.normalize(changed, record["line_e164"], pilot_conversations=allowlist) is None
+        for field in ("audience", "attachments"):
+            invalid = {**record, field: None}
+            with pytest.raises(Problem):
+                Comms.normalize(invalid, record["line_e164"], pilot_conversations=allowlist)
+        with pytest.raises(Problem):
+            Comms.normalize({**record, "body": ""}, record["line_e164"], pilot_conversations=allowlist)

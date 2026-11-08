@@ -23,19 +23,27 @@ The pilot uses a provider-supplied shared line. Comms advertises $0 and 100 mess
 ### 2. Receive, store and queue
 
 1. Receive `comms.message.received` at `POST /webhooks/comms`. Verify the `X-Osis-Signature` HMAC-SHA256 over the exact body before parsing. Use the signed event type. Use the provider message ID inside `data.message` for message deduplication across webhook and history. The envelope ID identifies a delivery event.
-2. The adapter verifies workspace/line, inbound direction, iMessage transport, direct audience, sender phone, conversation ID and original message time. Confirm the exact Free account fields against a signed event and its history record. Comms documents `audience`, `direction`, `channel` and `attachments`; validate how sender, line and timestamp are populated on the shared line. Missing evidence of identity, route or content classification prevents admission.
+2. The adapter verifies workspace/line, inbound direction, iMessage transport, direct audience, sender phone, conversation ID and original message time. Confirm the exact Free account fields against a signed event and its history record. Comms documents `audience`, `direction`, `channel` and `attachments`; validate how sender, line and timestamp are populated on the shared line. Missing identity or route evidence prevents admission. For this plain-text Free pilot, backend configuration `COMMS_PILOT_CONVERSATIONS` pairs a founder-confirmed one-to-one conversation ID with its approved tester phone (initially Pilot A). Every runtime intake must match this pair and the configured shared line, then resolve to a joined User. If `audience` or `attachments` is absent, that confirmed pair permits only a nonempty exact text body. This is an explicitly approved pilot rule, not a claim that omitted provider fields guarantee direct text. Explicit group, media, non-iMessage, self-echo, unsend or excluded-event evidence overrides the allowlist. Present-but-invalid/null classification remains invalid. The same rule applies to signed webhook intake and authenticated history recovery; no client-supplied allowlist is accepted.
 3. Resolve the normalized sender against User Service, require completed Join and reject messages before activation or User creation. Use the cursor-based lookup in the receive transaction. Email Join does not verify phone ownership.
 4. Lock the User, store the incoming message and queue its reply in one transaction. Acknowledge after commit. Reuse the stored inbound and reply on identical replays. A changed identity or route for the same provider message ID is a conflict.
 
 | Incoming case | Behavior |
 | --- | --- |
 | Direct text, emoji, whitespace or URL | Store exact text and queue “Received your text.” |
-| Direct media | Store the message identity and any caption. Queue “Please send text for now.” |
+| Direct media | Ignore in this plain-text pilot; media evidence cannot use the missing-field exception. Download nothing. |
 | Repeat delivery or history replay | Reuse records. Distinct messages with identical text each receive a reply. |
 | Group, reaction, edit, unsend, self echo, status or non-iMessage | Ignore. Treat a history update to an already stored message as the same message and preserve its stored text. |
 | Unknown sender, unjoined seed or unmatched Apple email alias | Ignore without storing its body. |
 
 Automatic URL previews stay text. Skip attachment downloads and storage of attachment URLs or transcripts. Confirm that history cannot turn a reaction or edit into a new eligible message. Keep the current 512 KiB body, 64 KiB UTF-8 text and 256-byte ID bounds. Return 2xx for committed, replayed or intentionally ignored events, 401 for bad signature, 413 for size, 422 for invalid/unclassifiable content, 409 for conflicting immutable replay and 503 for temporary storage failure. Keep the handler bounded and put provider calls in the delivery loop. [Comms webhooks](https://docs.osis.co/guides/webhooks) · [Message records](https://docs.osis.co/messages-api/list-messages).
+
+The runtime allowlist defaults to `{}`, which admits nothing. Populate only confirmed
+one-to-one conversation/approved-phone pairs in private server configuration; never
+commit real contacts or conversation IDs. Removing a pair stops new intake and
+history admission for it, while already committed outbound routes remain unchanged.
+The allowlist supplies pilot classification only: completed Join, original-time
+boundaries, signature/authenticated history and immutable replay checks still apply.
+No per-conversation table or generic permission framework is added.
 
 ### 3. Store messages and delivery work
 
@@ -59,7 +67,7 @@ Send via `POST https://osis.co/api/v1/comms/messages` with a Bearer key. Use the
 | Evidence | Local action |
 | --- | --- |
 | Valid acceptance with matching message ID and route | Save provider ID and accepted time. Track submitted work as `provider_queued`. A duplicate response returns the prior result. |
-| Verified sent/delivered or permanent failure/suppression | Record the corresponding terminal outcome and preserve the reported status. |
+| Verified sent/delivered/read or permanent failure/suppression | Record the corresponding terminal outcome and preserve the reported status. |
 | Known ID with unknown, missing or unconfirmed outcome | Keep it unresolved. Read the conversation's outbound history and match the exact ID and route. |
 | Timeout or unknown acceptance without ID | Retry the identical request with the same key and backoff within 24 hours of the first attempt. After that, hold as `uncertain` for reconciliation. |
 | Rate limit, quota or configuration rejection | Honor retry hints and pace the account. Log quota/auth failures and persist pauses so restart cannot bypass them. |
@@ -91,11 +99,11 @@ Later, Agent can consume a committed message ID, backend-resolved User ID, text 
 2. In [API keys](https://comms.osis.co/settings/api-keys), make a runtime key with `comms_read` and `comms_send`, scoped to the pilot line if available. Use a setup key with `comms_webhooks` for registration. The [quickstart](https://docs.osis.co/quickstart) documents these entry points.
 3. Register the controlled HTTPS capture URL using `POST https://osis.co/api/v1/comms/webhooks` with `url` and `events: ["comms.message.received"]`. Include `comms.ping` when using `POST /api/v1/comms/webhooks/{id}/test` for a signed smoke test. Save the returned `webhook.secret` securely. [Webhook setup](https://docs.osis.co/guides/webhooks).
 4. Use a consenting tester's iPhone to follow the assigned routing instructions and send a direct test iMessage. Compare its signed event with `GET /api/v1/comms/messages?conversation_id=<id>&direction=inbound`. Capture a small sanitized set for direct text/media, excluded events, replay and status. Verify one explicit iMessage reply through that conversation, with provider auto replies off. Check that Free permits the complete flow and record the actual account limits.
-5. After backend review, configure the existing Render service with `COMMS_API_KEY`, `COMMS_WEBHOOK_SECRET`, `COMMS_LINE_E164` and `MESSAGING_ACTIVATED_AT`. The final webhook must target `/webhooks/comms` and use its own signing secret. Apply the reviewed migration before compatible deployment. Keep runtime keys and test payloads out of Git.
+5. After backend review, configure the existing Render service with `COMMS_API_KEY`, `COMMS_WEBHOOK_SECRET`, `COMMS_LINE_E164`, `COMMS_PILOT_CONVERSATIONS` and `MESSAGING_ACTIVATED_AT`. The final webhook must target `/webhooks/comms` and use its own signing secret. Apply the reviewed migration before compatible deployment. Keep runtime keys and test payloads out of Git.
 
 ### Build sequence
 
-1. [TBD-18](https://linear.app/apt-knows/issue/TBD-18) — continue draft [server PR #5](https://github.com/tbd-knows/server/pull/5). Remove the draft Join welcome hook and pilot welcome command. Replace the provider boundary and update configuration, controlled tests, `setup.md` and `implementation-status.md`. Run `uv run --locked python scripts/run_database_tests.py -q` in a normal terminal with local PostgreSQL binaries on PATH. Account validation and fixture capture can proceed alongside the backend checks.
+1. [TBD-18](https://linear.app/apt-knows/issue/TBD-18) — continue [server PR #5](https://github.com/tbd-knows/server/pull/5). Remove the draft Join welcome hook and pilot welcome command. Replace the provider boundary and update configuration, controlled tests, `setup.md` and `implementation-status.md`. Run `uv run --locked python scripts/run_database_tests.py -q` in a normal terminal with local PostgreSQL binaries on PATH. Account validation and fixture capture can proceed alongside the backend checks.
 2. [TBD-20](https://linear.app/apt-knows/issue/TBD-20) — after backend review and merge, verify the hosted exchange with joined testers and record real timings. [TBD-17](https://linear.app/apt-knows/issue/TBD-17) tracks both pieces.
 
 ## End Goal

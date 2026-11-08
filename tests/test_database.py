@@ -796,7 +796,14 @@ def test_comms_webhook_to_reply_with_actual_database_and_fake_provider(store):
 
     identity, email = messaging_invitation(store, "+12125550997")
     user = store.join(identity, email)
-    messaging = Messaging(store, "fake", "fake-secret", "+12125550100", "2026-11-08T00:00:00Z")
+    messaging = Messaging(
+        store,
+        "fake",
+        "fake-secret",
+        "+12125550100",
+        "2026-11-08T00:00:00Z",
+        pilot_conversations={"conversation_fake": user["phone"]},
+    )
     messaging.loop.start = Mock()
     messaging.loop.stop = Mock()
     record = inbound(
@@ -956,3 +963,100 @@ def test_comms_exact_id_unknown_to_read_releases_next_conversation_job(store):
         assert stored["accepted_at"] is not None and stored["sent_observed_at"] is not None
         assert not record_send_result(cur, first["id"], attempted["attempt_id"], acceptance)
         assert claim(cur, account)["id"] == second["id"]
+
+
+def test_allowlisted_pilot_fixture_webhook_and_history_share_admission(store):
+    """Real sanitized shapes, signature boundary and actual atomic SQL; no live send."""
+    from copy import deepcopy
+    from datetime import datetime, timedelta
+    import hashlib
+    import hmac
+    import json
+    from unittest.mock import Mock
+    import httpx
+    from fastapi.testclient import TestClient
+    from tbd_server.messaging.adapter import Comms
+    from tbd_server.messaging.service import Messaging
+    from tbd_server.user.api import create_app
+
+    fixture = json.loads(Path("docs/messaging-service/fixtures/comms-free-pilot-a.json").read_text())
+    event, history = deepcopy(fixture["webhook"]), deepcopy(fixture["history"])
+    identity, email = messaging_invitation(store, "+12125550986")
+    user = store.join(identity, email)
+    other_identity, other_email = messaging_invitation(store, "+12125550985")
+    other = store.join(other_identity, other_email)
+    # Rebind the fixture's fake phone to an isolated fake User, preserving real shape/time/text.
+    event["data"]["message"]["author"]["external_id"] = user["phone"]
+    event["data"]["contact"]["phone"] = user["phone"]
+    history["author"]["external_id"] = user["phone"]
+    source = datetime.fromisoformat(history["created_at"].replace("Z", "+00:00"))
+    with psycopg.connect(os.environ["TEST_DATABASE_URL"]) as db:
+        db.execute(
+            "UPDATE user_service.users SET created_at=%s WHERE id IN (%s,%s)",
+            (source - timedelta(days=1), user["id"], other["id"]),
+        )
+    account, conversation = history["line_e164"], history["conversation_id"]
+    messaging = Messaging(
+        store,
+        "fake-key",
+        "fake-secret",
+        account,
+        (source - timedelta(hours=1)).isoformat(),
+        pilot_conversations={conversation: user["phone"]},
+    )
+    messaging.loop.start = Mock()
+    messaging.loop.stop = Mock()
+    records = [history]
+
+    def provider(request):
+        assert request.method == "GET" and request.url.params["direction"] == "inbound"
+        assert request.headers["authorization"] == "Bearer fake-key"
+        return httpx.Response(200, json={"messages": records})
+
+    messaging.adapter.close()
+    messaging.adapter = Comms("fake-key", transport=httpx.MockTransport(provider))
+    with TestClient(create_app(store, Mock(), "provision", "internal", [], messaging=messaging)) as client:
+
+        def post(value):
+            raw = json.dumps(value).encode()
+            signature = "sha256=" + hmac.new(b"fake-secret", raw, hashlib.sha256).hexdigest()
+            return client.post("/webhooks/comms", content=raw, headers={"X-Osis-Signature": signature})
+
+        assert post(event).status_code == 200
+        with store.transaction() as cur:
+            rows = cur.execute(
+                "SELECT * FROM messaging.messages WHERE user_id=%s ORDER BY queue_sequence", (user["id"],)
+            ).fetchall()
+        assert len(rows) == 2
+        assert rows[0]["text"] == history["body"] and rows[0]["state"] == "received"
+        assert rows[1]["text"] == "Received your text." and rows[1]["state"] == "pending"
+        assert rows[1]["reply_to_message_id"] == rows[0]["id"]
+        assert rows[0]["conversation_id"] == rows[1]["conversation_id"] == conversation
+        assert post(event).status_code == 200
+        assert messaging.history_turn(messaging.loop)
+        changes = [
+            {"author": {"external_id": other["phone"]}},
+            {"conversation_id": "conversation_not_approved"},
+            {"line_e164": "+12125550984"},
+            {"audience": "shared"},
+            {"attachments": [{"mediaType": "image"}]},
+            {"unsent_at": history["created_at"]},
+            {"direction": "outbound"},
+            {"channel": "sms"},
+            {"event": "comms.message.reaction.added"},
+            {"event": "comms.message.edited"},
+        ]
+        for n, change in enumerate(changes):
+            excluded = deepcopy(event)
+            excluded["data"]["message"].update(id=f"pilot_excluded_{n}", **change)
+            assert post(excluded).status_code == 200
+            records.append(excluded["data"]["message"])
+        messaging.next_sweep = 0
+        assert messaging.history_turn(messaging.loop)
+        with store.transaction() as cur:
+            rows_after = cur.execute(
+                "SELECT * FROM messaging.messages WHERE user_id IN (%s,%s) ORDER BY queue_sequence",
+                (user["id"], other["id"]),
+            ).fetchall()
+        assert [r["id"] for r in rows_after] == [r["id"] for r in rows]
+    messaging.adapter.close()

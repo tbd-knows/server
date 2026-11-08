@@ -84,22 +84,25 @@ class Comms:
         self.client.close()
 
     @staticmethod
-    def normalize(data, account, *, history=False):
+    def normalize(data, account, *, history=False, pilot_conversations=None):
         if not isinstance(data, dict):
             raise Problem(422, "Invalid message record")
-        # Missing classification differs from an explicitly excluded record.
-        for key in ("direction", "channel", "audience", "line_e164"):
+        for key in ("direction", "channel", "line_e164"):
             if not isinstance(data.get(key), str):
                 raise Problem(422, "Missing message classification")
-        if (data["direction"], data["channel"], data["audience"], data["line_e164"]) != (
-            "inbound",
-            "imessage",
-            "direct",
-            account,
-        ):
+        if (data["direction"], data["channel"], data["line_e164"]) != ("inbound", "imessage", account):
             return None
         if data.get("unsent_at"):
             return None
+        # A reaction collection on an original message is not a new reaction.
+        # Explicit event records, if returned in history, must never become texts.
+        if "event" in data and data["event"] != "comms.message.received":
+            return None
+        if "audience" in data:
+            if not isinstance(data["audience"], str):
+                raise Problem(422, "Invalid audience")
+            if data["audience"] != "direct":
+                return None
         author = data.get("author")
         if not isinstance(author, dict) or not isinstance(author.get("external_id"), str):
             raise Problem(422, "Sender identity missing")
@@ -107,8 +110,20 @@ class Comms:
         if not re.fullmatch(r"\+[1-9][0-9]{7,14}", peer) or peer == account:
             return None
         attachments = data.get("attachments")
-        if not isinstance(attachments, list):
-            raise Problem(422, "Attachment classification missing")
+        if "attachments" in data and not isinstance(attachments, list):
+            raise Problem(422, "Invalid attachment classification")
+        if pilot_conversations is not None:
+            conversation = data.get("conversation_id")
+            if not isinstance(conversation, str) or pilot_conversations.get(conversation) != peer:
+                return None
+            # Pilot approval covers one-to-one plain text only. Positive media or
+            # excluded-event evidence always overrides the missing-field exception.
+            if attachments:
+                return None
+            if not isinstance(data.get("body"), str) or not data["body"]:
+                raise Problem(422, "Pilot requires nonempty text")
+        elif "audience" not in data or "attachments" not in data:
+            raise Problem(422, "Missing message classification")
         # No downloads, URLs, transcripts or display names enter the core.
         try:
             source = datetime.fromisoformat(data["created_at"].replace("Z", "+00:00"))

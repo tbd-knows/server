@@ -20,12 +20,23 @@ from .runtime import DeliveryLoop, emit
 
 
 class Messaging:
-    def __init__(self, store, api_key, secret, account, activated_at):
+    def __init__(self, store, api_key, secret, account, activated_at, *, pilot_conversations=None):
         if not api_key or not secret or not re.fullmatch(r"\+[1-9][0-9]{7,14}", account):
             raise ValueError("Messaging credentials and E.164 number required")
         self.activated_at = datetime.fromisoformat(activated_at.replace("Z", "+00:00"))
         if self.activated_at.utcoffset() is None:
             raise ValueError("Messaging activation must include timezone")
+        if pilot_conversations is None:
+            pilot_conversations = {}
+        if not isinstance(pilot_conversations, dict) or any(
+            not isinstance(conversation, str)
+            or not 0 < len(conversation.encode()) <= 256
+            or not isinstance(phone, str)
+            or not re.fullmatch(r"\+[1-9][0-9]{7,14}", phone)
+            for conversation, phone in pilot_conversations.items()
+        ):
+            raise ValueError("Pilot conversation/phone allowlist is invalid")
+        self.pilot_conversations = dict(pilot_conversations)
         self.store, self.secret, self.account = store, secret, account
         self.adapter = Comms(api_key)
         self.loop = DeliveryLoop(store.database_url, self.adapter, account, self.history_turn)
@@ -85,7 +96,9 @@ class Messaging:
                     return {"received": True}
                 if not isinstance(event.get("data"), dict):
                     raise Problem(422, "Invalid event data")
-                normalized = self.adapter.normalize(event["data"].get("message"), self.account)
+                normalized = self.adapter.normalize(
+                    event["data"].get("message"), self.account, pilot_conversations=self.pilot_conversations
+                )
                 if normalized is not None:
                     await asyncio.to_thread(self.receive, normalized, request_id)
                 return {"received": True}
@@ -103,7 +116,9 @@ class Messaging:
                 emit("history_coverage_capped", count=len(records))
             for record in reversed(records):
                 try:
-                    event = self.adapter.normalize(record, self.account, history=True)
+                    event = self.adapter.normalize(
+                        record, self.account, history=True, pilot_conversations=self.pilot_conversations
+                    )
                     if event is not None:
                         self.receive(event)
                 except Problem:

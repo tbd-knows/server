@@ -35,3 +35,5 @@ services:
         sync: false
       - key: MESSAGING_ACTIVATED_AT
         sync: false
+      - key: COMMS_PILOT_CONVERSATIONS
+        sync: false
