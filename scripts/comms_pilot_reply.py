@@ -17,6 +17,11 @@ EXPECTED_TEXT = "app-tbd TBD pilot 1"
 REPLY = "Received your text."
 
 
+def check(condition, message):
+    if not condition:
+        raise AssertionError(message)
+
+
 def private_json(path, data):
     with path.open("w") as file:
         os.chmod(path, 0o600)
@@ -25,28 +30,29 @@ def private_json(path, data):
 
 def verify_pair(event, history, conversation):
     message = event["data"]["message"]
-    assert event["event"] == "comms.message.received", "Wrong event"
-    assert message["channel"] == "imessage" and message["direction"] == "inbound", "Wrong transport"
-    assert message["body"] == EXPECTED_TEXT, "Unexpected pilot message"
-    assert event["data"]["conversation_id"] == message["conversation_id"], "Envelope route mismatch"
-    assert event["data"]["contact"]["phone"] == message["author"]["external_id"], "Signed sender mismatch"
-    assert message["contact_id"] == message["author"]["contact_id"] == event["data"]["contact"]["id"], (
-        "Signed contact mismatch"
+    check(event["event"] == "comms.message.received", "Wrong event")
+    check(message["channel"] == "imessage" and message["direction"] == "inbound", "Wrong transport")
+    check(message["body"] == EXPECTED_TEXT, "Unexpected pilot message")
+    check(event["data"]["conversation_id"] == message["conversation_id"], "Envelope route mismatch")
+    check(event["data"]["contact"]["phone"] == message["author"]["external_id"], "Signed sender mismatch")
+    check(
+        message["contact_id"] == message["author"]["contact_id"] == event["data"]["contact"]["id"],
+        "Signed contact mismatch",
     )
     for key in ("id", "conversation_id", "contact_id", "line_e164", "channel", "direction", "body", "created_at"):
-        assert history.get(key) == message[key], "History mismatch: " + key
-    assert history.get("author") == message["author"], "History sender mismatch"
+        check(history.get(key) == message[key], "History mismatch: " + key)
+    check(history.get("author") == message["author"], "History sender mismatch")
     for record in (message, history):
         if "audience" in record:
-            assert record["audience"] == "direct", "Explicitly non-direct record"
+            check(record["audience"] == "direct", "Explicitly non-direct record")
         if "attachments" in record:
-            assert record["attachments"] == [], "Attachment present or unclassifiable"
-        assert not record.get("unsent_at"), "Message unsent"
-    assert conversation["id"] == message["conversation_id"], "Conversation mismatch"
-    assert conversation["phone"] == message["author"]["external_id"], "Conversation peer mismatch"
-    assert conversation["contact_id"] == message["contact_id"], "Conversation contact mismatch"
-    assert conversation["line_e164"] == message["line_e164"], "Conversation line mismatch"
-    assert conversation["channel"] == "imessage", "Conversation transport mismatch"
+            check(record["attachments"] == [], "Attachment present or unclassifiable")
+        check(not record.get("unsent_at"), "Message unsent")
+    check(conversation["id"] == message["conversation_id"], "Conversation mismatch")
+    check(conversation["phone"] == message["author"]["external_id"], "Conversation peer mismatch")
+    check(conversation["contact_id"] == message["contact_id"], "Conversation contact mismatch")
+    check(conversation["line_e164"] == message["line_e164"], "Conversation line mismatch")
+    check(conversation["channel"] == "imessage", "Conversation transport mismatch")
     return message
 
 
@@ -96,12 +102,17 @@ def main():
             receipts.append(json.loads(line))
         except ValueError:
             pass
-    assert any(
-        r.get("capture") == "signature_verified"
-        and r.get("capture_id") == capture.stem
-        and r.get("event") == "comms.message.received"
-        for r in receipts
-    ), "Matching verification receipt missing"
+    check(
+        any(
+            (
+                r.get("capture") == "signature_verified"
+                and r.get("capture_id") == capture.stem
+                and (r.get("event") == "comms.message.received")
+                for r in receipts
+            )
+        ),
+        "Matching verification receipt missing",
+    )
     event = json.loads(capture.read_text())
     message = event["data"]["message"]
     with httpx.Client(
@@ -116,11 +127,11 @@ def main():
         response.raise_for_status()
         records = response.json()["messages"]
         matches = [r for r in records if r.get("id") == message["id"]]
-        assert len(matches) == 1, "Exact inbound history record missing or duplicated"
+        check(len(matches) == 1, "Exact inbound history record missing or duplicated")
         response = client.get("conversations", params={"line_e164": message["line_e164"], "limit": 200})
         response.raise_for_status()
         conversations = [c for c in response.json()["conversations"] if c.get("id") == message["conversation_id"]]
-        assert len(conversations) == 1, "Exact conversation not found"
+        check(len(conversations) == 1, "Exact conversation not found")
         verify_pair(event, matches[0], conversations[0])
         private_json(root / "pilot-a-history.private.json", matches[0])
         private_json(root / "pilot-a-conversation.private.json", conversations[0])
@@ -135,15 +146,15 @@ def main():
                 "payload": {"conversation_id": message["conversation_id"], "body": REPLY, "channel": "imessage"},
             }
             private_json(state_path, state)  # Saved before any POST; never generate a replacement key.
-        assert state["payload"] == {
-            "conversation_id": message["conversation_id"],
-            "body": REPLY,
-            "channel": "imessage",
-        }, "Saved reply conflicts"
+        check(
+            state["payload"] == {"conversation_id": message["conversation_id"], "body": REPLY, "channel": "imessage"},
+            "Saved reply conflicts",
+        )
         if not state.get("provider_message_id"):
-            assert datetime.now(timezone.utc) - datetime.fromisoformat(state["first_attempt_at"]) < timedelta(
-                hours=24
-            ), "Retry key window expired; do not resend"
+            check(
+                datetime.now(timezone.utc) - datetime.fromisoformat(state["first_attempt_at"]) < timedelta(hours=24),
+                "Retry key window expired; do not resend",
+            )
             response = client.post(
                 "messages", headers={"Idempotency-Key": state["idempotency_key"]}, json=state["payload"]
             )
@@ -158,12 +169,16 @@ def main():
             private_json(state_path, state)
             response.raise_for_status()
             sent = result["message"]
-            assert sent["conversation_id"] == message["conversation_id"] and sent["channel"] == "imessage", (
-                "Acceptance route unconfirmed"
+            check(
+                sent["conversation_id"] == message["conversation_id"] and sent["channel"] == "imessage",
+                "Acceptance route unconfirmed",
             )
-            assert (
-                sent["direction"] == "outbound" and sent["body"] == REPLY and sent["line_e164"] == message["line_e164"]
-            ), "Acceptance identity unconfirmed"
+            check(
+                sent["direction"] == "outbound"
+                and sent["body"] == REPLY
+                and (sent["line_e164"] == message["line_e164"]),
+                "Acceptance identity unconfirmed",
+            )
             state["provider_message_id"] = sent["id"]
             private_json(state_path, state)
             print(
@@ -177,14 +192,16 @@ def main():
         private_json(root / "pilot-a-outbound-history.private.json", exact)
         if len(exact) == 1:
             observed = exact[0]
-            assert (
-                observed.get("conversation_id"),
-                observed.get("channel"),
-                observed.get("direction"),
-                observed.get("line_e164"),
-                observed.get("body"),
-            ) == (message["conversation_id"], "imessage", "outbound", message["line_e164"], REPLY), (
-                "Outbound history route mismatch"
+            check(
+                (
+                    observed.get("conversation_id"),
+                    observed.get("channel"),
+                    observed.get("direction"),
+                    observed.get("line_e164"),
+                    observed.get("body"),
+                )
+                == (message["conversation_id"], "imessage", "outbound", message["line_e164"], REPLY),
+                "Outbound history route mismatch",
             )
         status = exact[0].get("status") if len(exact) == 1 else "not_yet_observed"
         print(
