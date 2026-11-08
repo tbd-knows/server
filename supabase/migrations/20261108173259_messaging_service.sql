@@ -10,6 +10,7 @@ CREATE TABLE messaging.messages (
  dedupe_key text NOT NULL CHECK (octet_length(dedupe_key) BETWEEN 1 AND 512),
  account_ref text NOT NULL CHECK (account_ref ~ '^\+[1-9][0-9]{7,14}$'),
  peer_ref text NOT NULL CHECK (peer_ref ~ '^\+[1-9][0-9]{7,14}$'),
+ conversation_id text NOT NULL CHECK (octet_length(conversation_id) BETWEEN 1 AND 256),
  text text,
  has_unsupported_content boolean NOT NULL DEFAULT false,
  reply_to_message_id uuid,
@@ -22,18 +23,19 @@ CREATE TABLE messaging.messages (
  attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
  next_action_at timestamptz NOT NULL DEFAULT now(),
  error_code text CHECK (error_code ~ '^[a-z_]{1,64}$'),
- observed_status text CHECK (observed_status IN ('queued','polling','sent','delivered','failed')),
+ observed_status text CHECK (observed_status IN ('submitted','sent','delivered','failed','suppressed','unknown')),
  source_at timestamptz,
  created_at timestamptz NOT NULL DEFAULT now(),
  updated_at timestamptz NOT NULL DEFAULT now(),
  attempt_at timestamptz,
+ first_attempt_at timestamptz,
  accepted_at timestamptz,
  sent_observed_at timestamptz,
  UNIQUE (channel, direction, dedupe_key),
  UNIQUE (channel, direction, provider_message_id),
- UNIQUE (id, user_id, channel, account_ref, peer_ref, direction),
- FOREIGN KEY (reply_to_message_id, user_id, channel, account_ref, peer_ref, reply_to_direction)
-   REFERENCES messaging.messages(id, user_id, channel, account_ref, peer_ref, direction),
+ UNIQUE (id, user_id, channel, account_ref, peer_ref, conversation_id, direction),
+ FOREIGN KEY (reply_to_message_id, user_id, channel, account_ref, peer_ref, conversation_id, reply_to_direction)
+   REFERENCES messaging.messages(id, user_id, channel, account_ref, peer_ref, conversation_id, direction),
  CHECK (
    (direction = 'inbound' AND state = 'received' AND source_at IS NOT NULL
     AND provider_message_id IS NOT NULL AND reply_to_message_id IS NULL
@@ -57,7 +59,7 @@ GRANT USAGE ON SCHEMA messaging TO tbd_user_backend;
 GRANT SELECT, INSERT ON messaging.messages TO tbd_user_backend;
 -- Immutable identity/content/route columns cannot be rewritten by the runtime.
 GRANT UPDATE (provider_message_id, state, attempt_id, attempt_count, next_action_at,
- error_code, observed_status, updated_at, attempt_at, accepted_at, sent_observed_at)
+ error_code, observed_status, updated_at, attempt_at, first_attempt_at, accepted_at, sent_observed_at)
  ON messaging.messages TO tbd_user_backend;
 GRANT USAGE ON ALL SEQUENCES IN SCHEMA messaging TO tbd_user_backend;
 ALTER TABLE messaging.messages ENABLE ROW LEVEL SECURITY;
