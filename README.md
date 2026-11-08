@@ -4,7 +4,7 @@ Python 3.12/FastAPI User service for TBD v1. [Approved design](docs/user-service
 
 **User service v1 is implemented, merged and production-verified (2026-11-03).** The verification status records fresh hosted results, earlier controlled coverage and the cold-start/retry caveat. The contract is ready for Messaging integration; Messaging/Agent themselves are subsequent work.
 
-**Messaging Service v1 is in implementation planning.** Its [Markdown design](docs/messaging-service/design.md) and [approved Excalidraw](docs/messaging-service/architecture.excalidraw) define the Join welcome, stored iMessage intake, fixed reply and delivery loop. Work is tracked by [TBD-17](https://linear.app/apt-knows/issue/TBD-17).
+**Messaging Service v1 is in development.** The [design](docs/messaging-service/design.md) and [editable Excalidraw](docs/messaging-service/architecture.excalidraw) describe the Comms Free pilot. Joined testers send the first iMessage and TBD stores it and replies in the same conversation. Track the work in [TBD-17](https://linear.app/apt-knows/issue/TBD-17).
 
 ## Install and run
 
