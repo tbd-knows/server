@@ -39,7 +39,7 @@ def main():
             if metadata_file.exists():
                 previous = json.loads(metadata_file.read_text())
                 if previous["url"] != args.url and any(
-                    h.get("id") == previous["id"] and h.get("active", True) for h in hooks
+                    h.get("id") == previous["id"] and h.get("url") != args.url and h.get("active", True) for h in hooks
                 ):
                     raise SystemExit("Disable the old capture webhook in Comms before replacing its URL")
             webhook = next((h for h in hooks if h.get("url") == args.url), None)
