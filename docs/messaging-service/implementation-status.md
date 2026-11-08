@@ -95,3 +95,30 @@ PR #5 stays draft pending provider evidence and any corrections it reveals.
 TBD-18 and parent remain open. Full hosted proof with two joined testers is TBD-20
 **after** backend review, explicit founder merge approvals and merge. No reviewed
 backend deployment, production schema change or hosted verification occurred.
+
+## Pilot A capture — 2026-11-08 continuation
+
+The receiver saved a signature-verified `comms.ping` and then a
+signature-verified `comms.message.received`. Pilot A reports one blue iMessage
+and no automatic reply visible at screenshot time. The captured original message
+time is `2026-11-08T22:38:34.756Z`, with envelope `sentAt` 78 ms later. The full
+controlled routing text was retained. The signed record includes line, peer,
+contact, conversation, direction/channel and original time; **audience and
+attachments are both absent**. The user's history observation reports the same
+omissions; agent-side API comparison still awaits the runtime-key command.
+
+This is a concrete mapping limitation. Missing fields are not proof of direct
+text. Shared-line inability to create outbound groups does not prove inbound
+records can never be groups. Production normalization remains strict. Before a
+general admission rule changes, obtain a provider contract or positive direct/
+content metadata, with media and excluded-event fixtures and design review.
+
+A one-off manual proof script now requires explicit handset confirmation of a
+one-to-one text-only thread, reads matching inbound history and conversation
+metadata, checks peer/contact/line/conversation identities, saves a stable UUID
+before any send, and sends exactly one explicit iMessage reply. Retrying preserves
+the key; once an ID is known it reads history rather than posting again. This
+manual proof is separate from automatic production admission and cannot establish
+its missing classification contract. Its six focused synthetic tests pass.
+Actual history comparison, sanitized pair and reply/handset outcome remain pending
+execution of that hidden runtime-key command. No live reply is claimed yet.

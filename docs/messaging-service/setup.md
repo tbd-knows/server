@@ -115,3 +115,19 @@ message/attempt IDs, queue age, API duration and state/error observations correl
 stages. Acceptance is not sent or delivery. Render Free sleep pauses processing;
 pending rows do not wake it. Measure actual ordinary/burst/interleaved/quiet-wake
 latency during TBD-20; polling adds observation delay.
+
+### One-off Pilot A reply proof
+
+`scripts/comms_pilot_reply.py` is a manual capture-proof tool, not the runtime
+adapter. It requires `COMMS_PILOT_DIRECT_TEXT_CONFIRMED=YES` only after the tester
+confirms the thread contains just the tester and shared line and the message had
+no attachment. Use a hidden `COMMS_API_KEY` prompt in a temporary shell. The
+script reads and compares the signed capture, exact inbound history and matching
+conversation record before sending. It writes only private proof files under
+`/private/tmp/tbd-comms-capture`, including the stable reply key and a sanitized
+pair. Do not replace its key or payload if an outcome is unknown. Once it knows
+the provider message ID, another execution only checks outbound history.
+
+Absent audience/attachments remain absent in the sanitized evidence. Handset
+attestation for this one controlled exchange is not an automatic classification
+rule. The production adapter stays strict pending a provider-backed contract.
