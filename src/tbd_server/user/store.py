@@ -17,8 +17,9 @@ class Problem(Exception):
 
 
 class Store:
-    def __init__(self, database_url: str):
+    def __init__(self, database_url: str, *, messaging_account: str | None = None):
         self.database_url = database_url
+        self.messaging_account = messaging_account
         self.connections = BoundedSemaphore(4)
 
     @contextmanager
@@ -143,6 +144,11 @@ class Store:
                     (auth_id, entry["name"], entry["phone"], entry["email"], entry["type"]),
                 ).fetchone()
                 cur.execute("UPDATE invitations SET joined_user_id=%s WHERE id=%s", (row["id"], entry["id"]))
+            if self.messaging_account is not None:
+                from tbd_server.messaging.core import ensure_welcome
+
+                row = self.user(cur, row["id"])
+                ensure_welcome(cur, row, self.messaging_account)
         return row
 
     def save_address(self, user_id, address_id, data: AddressWrite):

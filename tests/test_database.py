@@ -29,7 +29,8 @@ def store():
         for role in ("anon", "authenticated"):
             if not db.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (role,)).fetchone():
                 db.execute(psycopg.sql.SQL("CREATE ROLE {}").format(psycopg.sql.Identifier(role)))
-        db.execute(next(Path("supabase/migrations").glob("*_user_service.sql")).read_text())
+        for migration in sorted(Path("supabase/migrations").glob("*.sql")):
+            db.execute(migration.read_text())
     return Store(make_conninfo(url, user="tbd_user_backend"))
 
 
@@ -607,3 +608,148 @@ def test_http_join_during_delivery_without_founder_resend(store, lost_response):
     assert saved["auth_user_id"] == identity and str(saved["joined_user_id"]) == joined["id"]
     with store.transaction() as cur:
         assert cur.execute("SELECT count(*) AS n FROM users WHERE auth_user_id=%s", (identity,)).fetchone()["n"] == 1
+
+
+def messaging_invitation(store, phone):
+    identity, invitation = uuid4(), uuid4()
+    email = f"{invitation}@example.test"
+    with psycopg.connect(os.environ["TEST_DATABASE_URL"]) as db:
+        db.execute("INSERT INTO auth.users VALUES (%s)", (identity,))
+    with store.transaction() as cur:
+        cur.execute(
+            "INSERT INTO invitations (id,name,phone,email,type,auth_user_id) VALUES (%s,'Messaging Example',%s,%s,'individual',%s)",
+            (invitation, phone, email, identity),
+        )
+    return identity, email
+
+
+def test_messaging_join_welcome_concurrency_and_rollback(store):
+    """Actual Join transaction, restricted role and competing requests."""
+    from tbd_server.messaging.core import ensure_welcome
+
+    messaging_store = Store(store.database_url, messaging_account="+12125550000")
+    identity, email = messaging_invitation(store, "+12125550991")
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        users = list(executor.map(lambda _: messaging_store.join(identity, email), range(2)))
+    assert users[0]["id"] == users[1]["id"]
+    with store.transaction() as cur:
+        user = Store.user(cur, users[0]["id"])
+        welcome = ensure_welcome(cur, user, "+12125550000")
+        # A changed configuration cannot create a second welcome.
+        assert ensure_welcome(cur, user, "+12125550009")["id"] == welcome["id"]
+        assert (
+            cur.execute("SELECT count(*) AS n FROM messaging.messages WHERE user_id=%s", (user["id"],)).fetchone()["n"]
+            == 1
+        )
+    with pytest.raises(RuntimeError):
+        with store.transaction() as cur:
+            from tbd_server.messaging.core import queue_message
+
+            user = Store.user(cur, users[0]["id"])
+            queue_message(cur, user, ("+12125550000", user["phone"]), "Rollback", "fake-rollback")
+            raise RuntimeError("injected before commit")
+    with store.transaction() as cur:
+        assert cur.execute("SELECT 1 FROM messaging.messages WHERE dedupe_key='fake-rollback'").fetchone() is None
+
+
+def test_messaging_private_schema_and_immutable_columns(store):
+    for role in ("anon", "authenticated"):
+        with psycopg.connect(os.environ["TEST_DATABASE_URL"]) as db:
+            db.execute(psycopg.sql.SQL("SET ROLE {}").format(psycopg.sql.Identifier(role)))
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                db.execute("SELECT * FROM messaging.messages")
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        with store.transaction() as cur:
+            cur.execute("UPDATE messaging.messages SET text='rewritten'")
+
+
+def test_messaging_inbound_replay_and_atomic_reply(store):
+    from dataclasses import replace
+    from datetime import datetime, timedelta, timezone
+    from tbd_server.messaging.core import ReceivedMessage, receive_message
+
+    identity, email = messaging_invitation(store, "+12125550992")
+    user = store.join(identity, email)
+    now = datetime.now(timezone.utc)
+    event = ReceivedMessage("fake-inbound-" + str(uuid4()), "+12125550000", user["phone"], " \n🙂\n ", False, now)
+
+    def receive():
+        with store.transaction() as cur:
+            return receive_message(cur, event, now - timedelta(days=1))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        rows = list(executor.map(lambda _: receive(), range(2)))
+    assert rows[0]["id"] == rows[1]["id"]
+    assert rows[0]["text"] == event.text
+    with store.transaction() as cur:
+        assert (
+            cur.execute(
+                "SELECT count(*) AS n FROM messaging.messages WHERE reply_to_message_id=%s", (rows[0]["id"],)
+            ).fetchone()["n"]
+            == 1
+        )
+    with pytest.raises(Problem) as error:
+        with store.transaction() as cur:
+            receive_message(cur, replace(event, text="changed"), now)
+    assert error.value.status == 409
+
+
+def test_messaging_delivery_route_order_stale_results_and_known_recovery(store):
+    from tbd_server.messaging.adapter import SendResult
+    from tbd_server.messaging.core import ensure_welcome, queue_message
+    from tbd_server.messaging.runtime import claim, record_send_result
+
+    account = "+12125550007"
+    identity, email = messaging_invitation(store, "+12125550993")
+    user = store.join(identity, email)
+    identity2, email2 = messaging_invitation(store, "+12125550994")
+    other = store.join(identity2, email2)
+    with store.transaction() as cur:
+        Store.user(cur, user["id"])
+        first = ensure_welcome(cur, user, account)
+        second = queue_message(cur, user, (account, user["phone"]), "second", "fake-second:" + str(user["id"]))
+        Store.user(cur, other["id"])
+        other_welcome = ensure_welcome(cur, other, account)
+    with store.transaction() as cur:
+        claimed = claim(cur, account)
+    assert claimed["id"] == first["id"]
+    with store.transaction() as cur:
+        # Another User progresses while the first route is awaiting an outcome.
+        assert claim(cur, account)["id"] == other_welcome["id"]
+        assert claim(cur, account) is None
+        assert not record_send_result(cur, first["id"], uuid4(), SendResult("failed"))
+        assert record_send_result(cur, first["id"], claimed["attempt_id"], SendResult("provider_queued", "fake-job-1"))
+        assert not record_send_result(cur, first["id"], claimed["attempt_id"], SendResult("sent", "wrong-job"))
+        assert record_send_result(
+            cur, first["id"], claimed["attempt_id"], SendResult("uncertain", "fake-job-1", "unknown_outcome")
+        )
+        assert claim(cur, account) is None
+        assert record_send_result(
+            cur, first["id"], claimed["attempt_id"], SendResult("sent", "fake-job-1", observed_status="sent")
+        )
+        assert not record_send_result(
+            cur, first["id"], claimed["attempt_id"], SendResult("provider_queued", "fake-job-1")
+        )
+        assert claim(cur, account)["id"] == second["id"]
+
+
+def test_messaging_reply_fk_blocks_cross_user_and_inbound_state_constraints(store):
+    account = "+12125550008"
+    identity, email = messaging_invitation(store, "+12125550995")
+    user = store.join(identity, email)
+    with pytest.raises(psycopg.errors.CheckViolation):
+        with store.transaction() as cur:
+            cur.execute(
+                """INSERT INTO messaging.messages
+                (user_id,channel,direction,dedupe_key,account_ref,peer_ref,text,state)
+                VALUES (%s,'imessage','inbound','fake-invalid',%s,%s,'text','received')""",
+                (user["id"], account, user["phone"]),
+            )
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+        with store.transaction() as cur:
+            cur.execute(
+                """INSERT INTO messaging.messages
+                (user_id,channel,direction,dedupe_key,account_ref,peer_ref,text,state,reply_to_message_id)
+                VALUES (%s,'imessage','outbound','fake-orphan',%s,%s,'reply','pending',%s)""",
+                (user["id"], account, user["phone"], uuid4()),
+            )
