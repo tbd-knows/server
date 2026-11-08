@@ -97,6 +97,7 @@ def test_strict_mapping_preserves_exact_text_and_media_caption():
         ("submitted", "provider_queued"),
         ("sent", "sent"),
         ("delivered", "sent"),
+        ("read", "sent"),
         ("failed", "failed"),
         ("suppressed", "failed"),
         ("unknown", "uncertain"),

@@ -23,7 +23,7 @@ CREATE TABLE messaging.messages (
  attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
  next_action_at timestamptz NOT NULL DEFAULT now(),
  error_code text CHECK (error_code ~ '^[a-z_]{1,64}$'),
- observed_status text CHECK (observed_status IN ('submitted','sent','delivered','failed','suppressed','unknown')),
+ observed_status text CHECK (observed_status IN ('submitted','sent','delivered','read','failed','suppressed','unknown')),
  source_at timestamptz,
  created_at timestamptz NOT NULL DEFAULT now(),
  updated_at timestamptz NOT NULL DEFAULT now(),

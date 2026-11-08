@@ -888,3 +888,71 @@ def test_comms_unknown_seed_boundary_and_history_edit_preservation(store):
         assert (
             cur.execute("SELECT 1 FROM messaging.messages WHERE dedupe_key='inbound:msg_rollback'").fetchone() is None
         )
+
+
+def test_comms_exact_id_unknown_to_read_releases_next_conversation_job(store):
+    """Actual sanitized provider shapes, real SQL states, no live HTTP/send."""
+    from copy import deepcopy
+    import json
+    import httpx
+    from tbd_server.messaging.adapter import Comms
+    from tbd_server.messaging.core import queue_message
+    from tbd_server.messaging.runtime import claim, record_send_result
+
+    fixture = json.loads(Path("docs/messaging-service/fixtures/comms-free-pilot-a.json").read_text())
+    account = "+12125550025"
+    identity, email = messaging_invitation(store, "+12125550988")
+    user = store.join(identity, email)
+    conversation = "conversation_read_recovery"
+    with store.transaction() as cur:
+        Store.user(cur, user["id"])
+        first = queue_message(
+            cur, user, (account, user["phone"], conversation), "Received your text.", "read-first:" + str(user["id"])
+        )
+        second = queue_message(
+            cur, user, (account, user["phone"], conversation), "Next reply", "read-second:" + str(user["id"])
+        )
+        attempted = claim(cur, account)
+    assert attempted["id"] == first["id"]
+    accepted = deepcopy(fixture["acceptance"]["message"])
+    read = deepcopy(fixture["later_outbound_history"][0])
+    for record in (accepted, read):
+        record.update(line_e164=account, conversation_id=conversation)
+    acceptance = Comms.classify(accepted, attempted)
+    assert acceptance.state == "uncertain" and acceptance.observed_status == "unknown"
+    with store.transaction() as cur:
+        assert record_send_result(cur, first["id"], attempted["attempt_id"], acceptance)
+        assert claim(cur, account) is None
+        known = cur.execute("SELECT * FROM messaging.messages WHERE id=%s", (first["id"],)).fetchone()
+    seen = []
+
+    def handler(request):
+        assert request.method == "GET"
+        assert request.url.params["conversation_id"] == conversation
+        assert request.url.params["direction"] == "outbound"
+        seen.append(request.method)
+        # A read result for another ID must not release this route.
+        records = [{**read, "id": "wrong_id"}]
+        if len(seen) > 1:
+            records.append(read)
+        return httpx.Response(200, json={"messages": records})
+
+    adapter = Comms("fake", transport=httpx.MockTransport(handler))
+    try:
+        missing = adapter.status(known)
+        assert missing.state == "uncertain"
+        with store.transaction() as cur:
+            assert record_send_result(cur, first["id"], attempted["attempt_id"], missing)
+            assert claim(cur, account) is None
+        terminal = adapter.status(known)
+    finally:
+        adapter.close()
+    assert seen == ["GET", "GET"]
+    assert terminal.state == "sent" and terminal.observed_status == "read"
+    with store.transaction() as cur:
+        assert record_send_result(cur, first["id"], attempted["attempt_id"], terminal)
+        stored = cur.execute("SELECT * FROM messaging.messages WHERE id=%s", (first["id"],)).fetchone()
+        assert stored["state"] == "sent" and stored["observed_status"] == "read"
+        assert stored["accepted_at"] is not None and stored["sent_observed_at"] is not None
+        assert not record_send_result(cur, first["id"], attempted["attempt_id"], acceptance)
+        assert claim(cur, account)["id"] == second["id"]

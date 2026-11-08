@@ -23,6 +23,12 @@ Real contacts, native IDs, keys, signatures and raw evidence stay private.
 - Pilot A subsequently confirmed exactly one reply arrived in the original
   iMessage thread. This is handset evidence; it does not change the provider's
   recorded status to sent/delivered. No replacement POST or new key is justified.
+- A later read-only history request at `23:05:38.437356Z` returned HTTP 200,
+  matching the same outbound ID and route with raw status **read** and provider
+  `read_at: 22:56:05.218Z`. The original acceptance and first unknown history
+  snapshot are retained unchanged alongside this later record. The helper's
+  initial `unrecognized` label was an incomplete allowlist, not the provider value.
+  Verified `read` now maps to local `sent`, preserving observed status `read`.
 - Pilot A reported no automatic reply visible before the controlled send. This
   does not independently prove every provider automation setting is disabled.
 
@@ -34,12 +40,12 @@ shape; a manual one-off handset check is not an automatic admission rule. Obtain
 provider-backed semantics or positive direct/content metadata, including media,
 group, reaction, edit and unsend evidence, before changing admission.
 
-The provider's unknown outcome, despite handset receipt, also needs a fresh
-exact-ID read and provider clarification if it persists. The delivery loop must
-keep that route unresolved until terminal evidence; silently treating acceptance
-or a manual screenshot as provider-sent would change the approved contract.
+The later exact-ID `read` result resolves the earlier unknown send outcome.
+Unknown acceptance alone still does not release a conversation; verified terminal
+history does. No replacement send was made or needed.
 
 Tests exercise these real sanitized shapes: missing classification remains 422;
-known-ID unknown remains unresolved and uses GET only. No live API calls occur in
+known-ID unknown remains unresolved; exact-ID read becomes local sent while
+preserving observed read and releases the next queued job. Status reads use GET only. No live API calls occur in
 the suite. Keep PR #5 draft and TBD-18 In Progress. Full hosted proof with two
 joined testers follows backend review, explicit founder merge approvals and merge.

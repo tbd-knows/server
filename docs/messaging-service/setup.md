@@ -94,8 +94,8 @@ body and explicit channel fixed. Unknown acceptance without ID retries with that
 key only within 24 hours of first attempt; after that it stays uncertain for
 reconciliation. Known IDs are read through outbound conversation history and
 matched exactly; missing/unknown status never releases the route. Do not requeue
-with a new key based on generic text and approximate time. Terminal failure or
-sent observation releases that conversation route; other routes progress alone.
+with a new key based on generic text and approximate time. Verified sent/delivered/read all use local `sent` with the exact observed
+provider status preserved. Terminal failure or success releases that conversation route; other routes progress alone.
 
 Shared API pacing is 1.1 seconds between completed requests. This is a conservative
 operational setting below the documented request budget, not a latency target.

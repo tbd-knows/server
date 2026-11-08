@@ -145,7 +145,7 @@ class Comms:
         ):
             return SendResult("uncertain", job.get("provider_message_id"), "identity_mismatch")
         status = data.get("status")
-        if status in ("sent", "delivered"):
+        if status in ("sent", "delivered", "read"):
             return SendResult("sent", native_id, observed_status=status)
         if status in ("failed", "suppressed"):
             return SendResult("failed", native_id, "provider_failed", observed_status=status)

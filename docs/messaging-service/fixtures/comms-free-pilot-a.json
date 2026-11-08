@@ -92,5 +92,27 @@
       "line_id": "line_shared_pilot",
       "line_e164": "+12125550100"
     }
+  ],
+  "later_history_observation": {
+    "observed_at": "2026-11-08T23:05:38.437356+00:00",
+    "http_status": 200,
+    "exact_id_match": true,
+    "helper_label_before_fix": "unrecognized",
+    "raw_provider_status": "read"
+  },
+  "later_outbound_history": [
+    {
+      "id": "msg_pilot_a_reply",
+      "conversation_id": "conversation_pilot_a",
+      "contact_id": "contact_pilot_a",
+      "direction": "outbound",
+      "channel": "imessage",
+      "body": "Received your text.",
+      "status": "read",
+      "created_at": "2026-11-08T22:54:51.240Z",
+      "line_id": "line_shared_pilot",
+      "line_e164": "+12125550100",
+      "read_at": "2026-11-08T22:56:05.218Z"
+    }
   ]
 }

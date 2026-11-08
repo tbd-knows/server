@@ -137,3 +137,24 @@ strict, so this does not prove automatic backend admission works with the actual
 Free shape. Provider classification semantics/metadata and terminal delivery
 state behavior remain material integration questions. PR #5 stays draft;
 TBD-18 remains In Progress. No production migration, deployment or merge occurred.
+
+## Exact-ID history read resolves the unknown reply outcome
+
+The fresh HTTP 200 history result at `2026-11-08T23:05:38.437356Z` matches the
+saved outbound ID and route and reports raw status `read`, with provider
+`read_at: 2026-11-08T22:56:05.218Z`. The earlier helper labeled this unrecognized
+because its allowlist omitted read; the provider field was present. Original
+unknown acceptance/history remain in the evidence fixture beside the later read.
+
+Per the approved correction, verified `read` maps to existing local `sent`, with
+`observed_status=read`; only the unapplied Messaging migration's status constraint
+is extended. No new local state or production migration is added. A focused real
+PostgreSQL + fake HTTP regression verifies unknown holds the next conversation
+job, a different ID's read does not release it, and exact-ID read records terminal
+success/observation and releases the next job. Stale unknown cannot regress it.
+Automatic intake still rejects the missing audience/attachments shape pending
+provider clarification. No live API/send was needed for this code correction.
+
+Verification for this correction: full disposable PostgreSQL harness **133 passed,
+zero skipped**; Ruff, formatting and whitespace checks pass. One existing upstream
+Starlette/AnyIO deprecation warning remains. No live send or hosted schema change.

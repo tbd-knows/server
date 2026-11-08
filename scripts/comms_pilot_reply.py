@@ -208,7 +208,8 @@ def main():
             "Exact reply status: "
             + (
                 status
-                if status in ("submitted", "sent", "delivered", "failed", "suppressed", "unknown", "not_yet_observed")
+                if status
+                in ("submitted", "sent", "delivered", "read", "failed", "suppressed", "unknown", "not_yet_observed")
                 else "unrecognized"
             )
         )
