@@ -122,3 +122,18 @@ manual proof is separate from automatic production admission and cannot establis
 its missing classification contract. Its six focused synthetic tests pass.
 Actual history comparison, sanitized pair and reply/handset outcome remain pending
 execution of that hidden runtime-key command. No live reply is claimed yet.
+
+## Pilot A completed one controlled exchange
+
+See [actual provider evidence](pilot-a-evidence.md) and the
+[sanitized webhook/history pair plus conversation and reply records](fixtures/comms-free-pilot-a.json).
+The private comparisons passed, one stable-key manual explicit-iMessage reply was
+accepted, and Pilot A confirmed exactly one arrival in the original thread.
+Provider acceptance and captured exact-ID outbound history still reported unknown
+with `delivery_unknown: true`; preserve that distinction from handset evidence.
+
+Both incoming records omit audience/attachments. The production adapter remains
+strict, so this does not prove automatic backend admission works with the actual
+Free shape. Provider classification semantics/metadata and terminal delivery
+state behavior remain material integration questions. PR #5 stays draft;
+TBD-18 remains In Progress. No production migration, deployment or merge occurred.
