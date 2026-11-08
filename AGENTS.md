@@ -1,6 +1,6 @@
 # Implementation rules
 
-- Read `docs/user-service/design.md` and the assigned Linear issue first. Implement TBD v1 only; ask before expanding product scope.
+- Read the assigned Linear issue and its service design under `docs/` first. For Messaging, also read `docs/user-service/design.md` for the Join and identity contract. Implement TBD v1 only; ask before expanding product scope.
 - Keep Python backend logic here. Use the planned FastAPI/Supabase stack; add no extra services, roles framework, ORM, queue, or cache without a concrete requirement.
 - Use Markdown under `docs/`. Diagrams must be editable `.excalidraw` files; no Mermaid. Keep the design and implemented API consistent.
 - No real waitlist/seed records or secrets in this public repository. Use fake fixtures, environment variables, pinned dependencies, and lockfiles.
