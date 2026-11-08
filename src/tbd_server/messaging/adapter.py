@@ -163,14 +163,14 @@ class Comms:
             )
         except httpx.HTTPError:
             return SendResult("pending", error_code="transport_unknown")
+        if response.status_code == 429:
+            return SendResult("pending", error_code="rate_limited", retry_after=retry_after(response))
         try:
             data = response.json()
         except ValueError:
             return SendResult("pending", error_code="invalid_response")
         if response.status_code in (200, 202):
             return self.classify(data.get("message") if isinstance(data, dict) else None, job)
-        if response.status_code == 429:
-            return SendResult("pending", error_code="rate_limited", retry_after=retry_after(response))
         if response.status_code == 402:
             return SendResult("pending", error_code="quota", retry_after=3600)
         if response.status_code in (401, 403):

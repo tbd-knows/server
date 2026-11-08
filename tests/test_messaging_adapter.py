@@ -151,6 +151,15 @@ def test_provider_rejections(code, data, state, delay):
     adapter.close()
 
 
+def test_empty_429_preserves_default_account_pause():
+    adapter = Comms("fake", transport=httpx.MockTransport(lambda _: httpx.Response(429)))
+    try:
+        result = adapter.send(job())
+        assert (result.state, result.error_code, result.retry_after) == ("pending", "rate_limited", 60)
+    finally:
+        adapter.close()
+
+
 def test_status_matches_exact_id_in_conversation_no_post():
     j = job()
     j["provider_message_id"] = "msg_reply_fake"
