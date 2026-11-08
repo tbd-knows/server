@@ -1,17 +1,18 @@
-"""Texting Blue wire boundary. Never log provider payloads or request URLs."""
+"""Comms by Osis boundary. Wire mappings require Free-account fixture validation."""
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
+from datetime import datetime
 import hashlib
 import hmac
 import json
-from urllib.parse import quote
+import math
+import re
 
 import httpx
 
 from tbd_server.user.store import Problem
+from .core import ReceivedMessage, utf8_size
 
 
 @dataclass(frozen=True)
@@ -27,55 +28,46 @@ def signed_event(body: bytes, signature: str, secret: str) -> dict:
     if len(body) > 512 * 1024:
         raise Problem(413, "Webhook body too large")
     expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(signature.encode(), expected.encode()):
+    if not hmac.compare_digest(signature.lower().encode(), expected.encode()):
         raise Problem(401, "Invalid webhook signature")
     try:
         event = json.loads(body)
     except (ValueError, UnicodeError, RecursionError):
         raise Problem(422, "Invalid webhook JSON") from None
-    if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+    if not isinstance(event, dict) or not isinstance(event.get("event"), str):
         raise Problem(422, "Invalid webhook event")
     return event
 
 
-def retry_after(response: httpx.Response) -> float:
-    # Provider documents seconds. Bound invalid/non-finite values to the default.
+def retry_after(response):
     try:
-        value = float(response.headers.get("retry-after", "30"))
-        if 0 < value < float("inf"):
-            return value
-    except ValueError:
-        try:
-            until = parsedate_to_datetime(response.headers.get("retry-after", ""))
-            value = (until - datetime.now(timezone.utc)).total_seconds()
-            if value > 0:
-                return value
-        except (TypeError, ValueError, OverflowError):
-            pass
-    return 30.0
+        value = response.json().get("retry_after", 60)
+        if not isinstance(value, bool) and 0 < float(value) and math.isfinite(float(value)):
+            return float(value)
+    except (ValueError, TypeError, AttributeError):
+        pass
+    return 60.0
 
 
-class TextingBlue:
-    def __init__(self, api_key: str, *, transport=None):
+class Comms:
+    def __init__(self, api_key, *, transport=None):
         self.production = transport is None
         self.client = httpx.Client(
-            base_url="https://api.texting.blue",
-            headers={"x-api-key": api_key},
+            base_url="https://osis.co/api/v1/comms/",
+            headers={"Authorization": "Bearer " + api_key},
             timeout=10,
             follow_redirects=False,
-            transport=transport if transport is not None else httpx.HTTPTransport(retries=0),
+            transport=transport or httpx.HTTPTransport(retries=0),
         )
 
     def request(self, method, path, **kwargs):
         if not self.production:
             return self.client.request(method, path, **kwargs)
 
-        async def bounded_request():
-            # A total deadline is required: HTTPX phase timeouts alone do not
-            # bound a slow multi-phase response to ten seconds.
+        async def bounded():
             async with asyncio.timeout(10):
                 async with httpx.AsyncClient(
-                    base_url="https://api.texting.blue",
+                    base_url=str(self.client.base_url),
                     headers=self.client.headers,
                     timeout=10,
                     follow_redirects=False,
@@ -84,104 +76,140 @@ class TextingBlue:
                     return await client.request(method, path, **kwargs)
 
         try:
-            return asyncio.run(bounded_request())
+            return asyncio.run(bounded())
         except TimeoutError:
-            raise httpx.ReadTimeout("Provider request deadline") from None
+            raise httpx.ReadTimeout("Provider deadline") from None
 
     def close(self):
         self.client.close()
 
     @staticmethod
-    def classify(response, account, peer, text, *, known_id=None):
-        # Only explicit non-acceptance permits another POST. 5xx/redirects are ambiguous.
-        if response.status_code == 429:
-            return SendResult("pending", known_id, "rate_limited", retry_after(response))
-        if response.status_code == 402:
-            return SendResult("pending", known_id, "quota", 3600)
-        if response.status_code in (401, 403):
-            return SendResult("pending", known_id, "account_configuration", 30)
-        if response.status_code in (400, 422) and known_id is None:
-            return SendResult("failed", error_code="invalid_request")
-        expected_status = 200 if known_id else 202
-        if response.status_code != expected_status:
-            return SendResult("uncertain", known_id, "unknown_outcome")
+    def normalize(data, account, *, history=False):
+        if not isinstance(data, dict):
+            raise Problem(422, "Invalid message record")
+        # Missing classification differs from an explicitly excluded record.
+        for key in ("direction", "channel", "audience", "line_e164"):
+            if not isinstance(data.get(key), str):
+                raise Problem(422, "Missing message classification")
+        if (data["direction"], data["channel"], data["audience"], data["line_e164"]) != (
+            "inbound",
+            "imessage",
+            "direct",
+            account,
+        ):
+            return None
+        if data.get("unsent_at"):
+            return None
+        author = data.get("author")
+        if not isinstance(author, dict) or not isinstance(author.get("external_id"), str):
+            raise Problem(422, "Sender identity missing")
+        peer = author["external_id"]
+        if not re.fullmatch(r"\+[1-9][0-9]{7,14}", peer) or peer == account:
+            return None
+        attachments = data.get("attachments")
+        if not isinstance(attachments, list):
+            raise Problem(422, "Attachment classification missing")
+        # No downloads, URLs, transcripts or display names enter the core.
+        try:
+            source = datetime.fromisoformat(data["created_at"].replace("Z", "+00:00"))
+        except (KeyError, TypeError, ValueError, AttributeError):
+            raise Problem(422, "Original message time missing") from None
+        return ReceivedMessage(
+            data.get("id"),
+            account,
+            peer,
+            data.get("body"),
+            bool(attachments),
+            source,
+            data.get("conversation_id"),
+            history=history,
+        )
+
+    @staticmethod
+    def classify(data, job):
+        if not isinstance(data, dict):
+            return SendResult("uncertain", job.get("provider_message_id"), "invalid_response")
+        native_id = data.get("id")
+        try:
+            valid_id = isinstance(native_id, str) and 0 < utf8_size(native_id) <= 256
+        except Problem:
+            valid_id = False
+        if (
+            not valid_id
+            or data.get("conversation_id") != job["conversation_id"]
+            or data.get("line_e164") != job["account_ref"]
+            or data.get("direction") != "outbound"
+            or data.get("channel") != "imessage"
+            or data.get("body") != job["text"]
+            or (job.get("provider_message_id") and native_id != job["provider_message_id"])
+        ):
+            return SendResult("uncertain", job.get("provider_message_id"), "identity_mismatch")
+        status = data.get("status")
+        if status in ("sent", "delivered"):
+            return SendResult("sent", native_id, observed_status=status)
+        if status in ("failed", "suppressed"):
+            return SendResult("failed", native_id, "provider_failed", observed_status=status)
+        if status == "submitted":
+            return SendResult("provider_queued", native_id, observed_status=status)
+        return SendResult("uncertain", native_id, "unknown_status", observed_status="unknown")
+
+    def send(self, job):
+        try:
+            response = self.request(
+                "POST",
+                "messages",
+                headers={"Idempotency-Key": str(job["id"])},
+                json={"conversation_id": job["conversation_id"], "body": job["text"], "channel": "imessage"},
+            )
+        except httpx.HTTPError:
+            return SendResult("pending", error_code="transport_unknown")
         try:
             data = response.json()
         except ValueError:
-            return SendResult("uncertain", known_id, "invalid_response")
-        if not isinstance(data, dict):
-            return SendResult("uncertain", known_id, "invalid_response")
-        native_id = data.get("id")
-        if (
-            not isinstance(native_id, str)
-            or not 0 < len(native_id.encode()) <= 256
-            or (known_id is not None and native_id != known_id)
-            or data.get("from") != account
-            or data.get("to") != peer
-            or data.get("content") != text
-        ):
-            return SendResult("uncertain", known_id, "identity_mismatch")
-        status = data.get("status")
-        if status in ("sent", "delivered") and known_id:
-            return SendResult("sent", native_id, observed_status=status)
-        if status == "failed" and known_id:
-            return SendResult("failed", native_id, "provider_failed", observed_status=status)
-        if status in ("queued", "polling"):
-            return SendResult("provider_queued", native_id, observed_status=status)
-        return SendResult("uncertain", native_id, "unknown_status")
+            return SendResult("pending", error_code="invalid_response")
+        if response.status_code in (200, 202):
+            return self.classify(data.get("message") if isinstance(data, dict) else None, job)
+        if response.status_code == 429:
+            return SendResult("pending", error_code="rate_limited", retry_after=retry_after(response))
+        if response.status_code == 402:
+            return SendResult("pending", error_code="quota", retry_after=3600)
+        if response.status_code in (401, 403):
+            return SendResult("pending", error_code="account_configuration", retry_after=60)
+        code = data.get("code") or data.get("error") if isinstance(data, dict) else None
+        if code in ("line_mismatch", "conversation_line_mismatch", "line_channel_unsupported"):
+            return SendResult("pending", error_code="account_configuration", retry_after=60)
+        if response.status_code >= 500 or code in ("idempotency_in_progress", "reply_target_unavailable"):
+            return SendResult("pending", error_code="provider_retry")
+        return SendResult("failed", error_code="request_rejected")
 
-    def send(self, account, peer, text):
-        try:
-            response = self.request("POST", "/v1/messages/send", json={"from": account, "to": peer, "content": text})
-        except httpx.HTTPError:
-            return SendResult("uncertain", error_code="transport_unknown")
-        return self.classify(response, account, peer, text)
-
-    def status(self, native_id, account, peer, text):
-        try:
-            response = self.request("GET", "/v1/messages/" + quote(native_id, safe=""))
-        except httpx.HTTPError:
-            return SendResult("uncertain", native_id, "read_unavailable")
-        result = self.classify(response, account, peer, text, known_id=native_id)
-        # A failed read never turns a previously accepted job into a new send.
-        if result.state == "pending":
-            return SendResult("uncertain", native_id, result.error_code, result.retry_after)
-        return result
-
-    def history(self, account, cursor=None):
-        params = {"direction": "inbound", "to": account, "limit": 100}
-        if cursor is not None:
-            params["cursor"] = cursor
-        response = self.request("GET", "/v1/messages", params=params)
-        response.raise_for_status()
-        page = response.json()
-        if (
-            not isinstance(page, dict)
-            or not isinstance(page.get("messages"), list)
-            or not isinstance(page.get("has_more"), bool)
-        ):
-            raise ValueError("Invalid history page")
-        return page
-
-    @staticmethod
-    def normalize(data, account):
-        """Fail closed until real fixtures establish direct-content metadata.
-
-        Published payloads do not establish group/reaction/edit classification.
-        No invented provider fields or missing-field defaults are accepted here.
-        """
-        if not isinstance(data, dict):
-            raise Problem(422, "Invalid message record")
-        if data.get("to") != account:
-            return None
-        # This is an explicit integration blocker, not silent message loss.
-        raise Problem(422, "Provider direct-message classification not yet verified")
-
-    def number_status(self, account):
-        response = self.request("GET", "/v1/numbers")
+    def history(self, *, since=None, conversation=None, direction="inbound"):
+        params = {"direction": direction, "limit": 200}
+        if since is not None:
+            params["since"] = since
+        if conversation is not None:
+            params["conversation_id"] = conversation
+        response = self.request("GET", "messages", params=params)
         response.raise_for_status()
         data = response.json()
-        for number in data["numbers"]:
-            if number.get("phone_number") == account:
-                return number
-        raise ValueError("Configured number missing")
+        if not isinstance(data, dict) or not isinstance(data.get("messages"), list):
+            raise ValueError("Invalid history")
+        return data["messages"]
+
+    def status(self, job):
+        try:
+            records = self.history(conversation=job["conversation_id"], direction="outbound")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (401, 403, 429):
+                return SendResult(
+                    "uncertain",
+                    job["provider_message_id"],
+                    "rate_limited" if exc.response.status_code == 429 else "account_configuration",
+                    retry_after(exc.response) if exc.response.status_code == 429 else 60,
+                )
+            return SendResult("uncertain", job["provider_message_id"], "read_unavailable")
+        except (httpx.HTTPError, ValueError):
+            return SendResult("uncertain", job["provider_message_id"], "read_unavailable")
+        for record in records:
+            if isinstance(record, dict) and record.get("id") == job["provider_message_id"]:
+                return self.classify(record, job)
+        return SendResult("uncertain", job["provider_message_id"], "history_missing")

@@ -27,11 +27,11 @@ services:
         sync: false
       - key: ALLOWED_WEB_ORIGINS
         sync: false
-      - key: TEXTING_BLUE_API_KEY
+      - key: COMMS_API_KEY
         sync: false
-      - key: TEXTING_BLUE_WEBHOOK_SECRET
+      - key: COMMS_WEBHOOK_SECRET
         sync: false
-      - key: TEXTING_BLUE_PHONE_NUMBER
+      - key: COMMS_LINE_E164
         sync: false
       - key: MESSAGING_ACTIVATED_AT
         sync: false

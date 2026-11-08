@@ -1,86 +1,97 @@
-# TBD-18 checkpoint — implementation draft
+# TBD-18 — Comms Free revision checkpoint
 
-Updated 2026-11-08. TBD-18 is **In Progress**, not complete. No deployment,
-production migration, live send, phone verification or merge has occurred.
-Work continues only in `~/Desktop/TBD/codebase/server` on
-`messaging-v1-implementer`. The obsolete worktree was removed normally after
-checking cleanliness and preservation of `3f9d1adc`.
+Updated 2026-11-08. **In Progress; draft PR #5 remains open.** Governing design:
+`6b2c67e0eaccea7bc7be55827a4dfe92c36c6e93` (docs PR #6, now merged on main).
+The implementation branch includes current main `3370855` via a normal merge.
+Work is in the original `server` checkout on `messaging-v1-implementer`.
 
-## Current scope and evidence
+## Implemented and tested locally
 
-| AC | Implemented | Remaining evidence/work |
-| --- | --- | --- |
-| AC1 Join | Same-transaction welcome hook on new/repeated Join; original welcome reuse; selected-User CLI | Execute concurrent/rollback PostgreSQL tests; hosted welcome later |
-| AC2 Storage | Private table, native/producer uniqueness, route FK, exact content, replay comparison, atomic inbound/reply | Execute real constraints/transaction/concurrency tests |
-| AC3 Identity/content | HMAC before parse, bounded body/text/IDs, canonical joined User lookup and time filters | **Blocked:** real provider direct/group/reaction/edit/media classification mapping; current adapter rejects unclassifiable payloads with 422 |
-| AC4 Delivery | Claim before HTTP, route ordering, attempt/job checks, queued versus sent, no ambiguous re-POST, known-ID reads, saved-result retry | Execute real state/order tests and controlled loop fault coverage; account behavior unverified |
-| AC5 Recovery | Session advisory ownership, restart uncertainty, pending resume, full paged history including empty pages, cursor failure visibility, lifecycle/loop health | PostgreSQL ownership/restart/wake proof and retained real history fixtures |
-| AC6 Observability | Stage/queue logs, request/message/attempt IDs, durations/queue age, SQL counts, last API/history/device observations, shared pacing and pauses | Integrated burst/quota tests; actual baseline is TBD-20 |
-| AC7 Safety | Private schema/RLS/grants, immutable-column restrictions, added migration, fake HTTP and regression tests | Execute role/FK/transaction tests; inspect migration with advisors before release |
+- Removed the draft Join welcome hook and pilot command. User Store matches main.
+  New/repeated/concurrent Join creates zero Messaging rows.
+- One private table retains immutable User/line/peer/conversation/channel routes,
+  native/producer dedupe, reply foreign keys, queue state and first-attempt time.
+  Only the **unapplied** Messaging migration changed; the released User migration
+  is unchanged. No production migration or reset occurred.
+- `/webhooks/comms` verifies raw-body `X-Osis-Signature`, reads the signed event and
+  nested `data.message`, and admits through the canonical joined User transaction.
+  The provisional documented mapping requires inbound/direct/iMessage, line,
+  `author.external_id`, conversation, original time and attachments classification.
+  It has **not** been validated against a real Free-account event/history pair.
+- Atomic inbound plus reply, exact text, conflicting route rejection and replay
+  reuse. History updates preserve original stored text. No attachment URLs,
+  downloads or transcripts are stored. Unknown/seeded/old messages are ignored.
+- Comms Bearer adapter sends the stored conversation/body with explicit iMessage
+  and outbound UUID as `Idempotency-Key`. Retry payload/key stays fixed. First
+  attempt anchors the conservative 24-hour window; after it, no-ID work is held
+  uncertain. Known-ID status reads match exact IDs/routes in outbound history.
+- One session-owned lifecycle loop, per-conversation ordering, independent routes,
+  persisted pauses, restart recovery and result-save retry. Requests have a total
+  ten-second deadline. History uses fixed activation since, inbound direction and
+  limit 200, oldest first, reporting possible incomplete coverage at the cap.
+- Safe correlated logs/queue queries, loop health, config examples and runbook.
+  Pacing is 1.1 seconds between completed API calls; actual Free behavior is pending.
 
-Signed intake, lifecycle/health wiring, send/status/history/number loop, pilot CLI,
-configuration templates and [setup/runbook](setup.md) are drafted. This is **not
-ready to deploy**: `TextingBlue.normalize` intentionally raises 422 when the
-record lacks an established direct-content classification contract. A 422 is
-visible failure, not successful admission. No invented provider fields are used.
-
-The provider's published webhook example contains native `data.id`, sender,
-destination, content, media URL and timestamp but no metadata proving directness
-or distinguishing excluded event types. Obtain sanitized real webhook **and
-history** records, or provider confirmation, then implement that mapping and test
-excluded content/unknown sender cases. References:
-<https://docs.texting.blue/api/webhooks/>,
-<https://docs.texting.blue/api/messages/>,
-<https://docs.texting.blue/api/numbers/>.
-
-## Tests actually executed
-
-```bash
-.venv/bin/python -m pytest -q tests/test_api.py tests/test_auth.py tests/test_cli.py tests/test_models.py tests/test_messaging_adapter.py tests/test_messaging_core.py tests/test_messaging_integration.py
-.venv/bin/ruff check src tests scripts
-.venv/bin/ruff format --check src tests scripts
-git diff --check
-```
-
-**74 passed, zero skipped** in the explicitly non-database selection. One existing
-Starlette/AnyIO deprecation warning. Controlled HTTP tests cannot reach the live
-account. Included: signature/size failure, ambiguous POST and deadline cancellation,
-route/job identity mismatch, known-ID 404, quota/rate/auth outcomes, exact UTF-8
-content, history filters/empty pages/broken cursors, and loop-health conditions.
-This is not PostgreSQL or hosted evidence. Database tests are authored/collected,
-not passed; ownership/SQL fault tests still need execution and expansion.
-
-The requested `uv run --locked python scripts/run_database_tests.py -q` first
-fails writing the default UV cache. With a writable cache it cannot resolve
-`pypi.org` to build Hatchling. With `--no-sync` and the existing environment it
-reaches the harness and fails at `listener.bind(("127.0.0.1", 0))`:
-
-```text
-PermissionError: [Errno 1] Operation not permitted
-```
-
-This session's permission policy automatically rejects sandbox approval; no
-approval prompt is available. Run in a normal terminal, from `server`:
+## Executed verification
 
 ```bash
 PATH=/opt/homebrew/opt/postgresql@17/bin:$PATH uv run --locked python scripts/run_database_tests.py -q
+uv run --locked ruff check src tests scripts
+uv run --locked ruff format --check src tests scripts
+git diff --check
 ```
 
-Do not use hosted PostgreSQL as a workaround. No database checks/advisors are
-claimed. The new migration was generated by the cached Supabase CLI after current
-help, with writable temporary XDG directories and `SUPABASE_TELEMETRY_DISABLED=1`.
-The released User migration is unchanged.
+**120 passed, zero skipped**, disposable local PostgreSQL over TCP and restricted
+backend SQL role; one existing Starlette/AnyIO deprecation warning. The full suite
+includes User regression coverage and controlled Comms HTTP fixtures. The initial
+actual run found an indeterminate SQL parameter type; an explicit cast fixed it.
+The previous sandbox/DNS blockers are resolved; they are historical, not current.
+No automated test uses the live Comms account or hosted database.
 
-## Git and review
+Coverage includes schema/browser denial, immutable columns, inbound state/FK
+checks, concurrent Join/admission/replay, transaction rollback, exact text,
+unknown/unjoined seeds and activation/User-creation boundaries, history edit
+preservation, distinct identical messages, stable retry UUID/first-attempt time,
+expiry uncertainty, exact-ID states, stale results, route ordering, independent
+Users, advisory ownership, and HTTP intake-to-SQL-to-fake-provider acceptance.
+Fixtures are **synthetic documentation examples**, not sanitized real evidence.
 
-Shell fetch/push are blocked by DNS (`Could not resolve host: github.com`). The
-connected GitHub API supplied missing actual Git objects; their SHA-1 hashes were
-verified before importing them. Current `origin/main` is
-`7fd6ef5f4e67dcb06b7d55ad620254b837da443e`, merged normally into the local
-implementation history. Ancestor verification passes. Earlier documentation
-copying alone was not ancestry synchronization.
+## Early Free-account proof — pending access
 
-Publish a draft only, preserving local implementation commits if connector
-publication creates a new commit identity. Both founders must explicitly approve
-merging. TBD-20 actual phone evidence follows reviewed backend merge; TBD-17 and
-TBD-18 remain open until their evidence is complete.
+A temporary signature-only capture receiver and HTTPS tunnel are prepared. It
+returns 503 until its Comms secret is installed and stores verified raw evidence
+privately outside Git with mode 0600. No webhook has been registered, no key has
+been used, and no live reply has been sent. It is not a production deployment.
+Setup/capture scripts are documented in [setup.md](setup.md); runtime never gets
+the separate setup key. Registration includes received and ping events.
+
+The user has been asked to select **Start Free**, confirm Free/shared line and the
+exact first-text/keyword instructions, confirm auto replies off, provide only a
+private env-file path for the separate scoped keys, and identify a consenting
+joined tester privately. Those responses/access are still pending.
+
+Before claiming provider compatibility, capture a signed direct iMessage event
+and its matching inbound history record, confirm line/sender/time/audience and
+content mapping, send one stable-key reply in that conversation, read its outcome
+and obtain same-thread iMessage confirmation. Confirm how routing texts are
+consumed and whether an agent object is needed with automated replies disabled.
+Record actual Free allowance/reset, retention/history cap and any limitations.
+Publish only sanitized fixtures; raw contacts, signatures, bodies and credentials
+stay private. No current phone, routing or Free API capability claim is made.
+
+## Acceptance status
+
+| AC | Evidence / remaining |
+| --- | --- |
+| AC1 eligibility | Local PostgreSQL: Join sends nothing; joined senders eligible; unknown/seeded senders ignored |
+| AC2 storage | Local transaction/concurrency/HTTP proof; real webhook/history fixture validation pending |
+| AC3 identity/content | Signature/strict documented mapping tests pass; actual shared-line/media/excluded-event mapping pending |
+| AC4 delivery | Controlled stable-key/retry/window/status/order proof; real same-conversation reply and account limits pending |
+| AC5 recovery | Local ownership/history/retry tests; actual Free history window and retained-message/wake proof pending |
+| AC6 observability | Local safe logs and state checks; actual provider baseline belongs to early proof/TBD-20 |
+| AC7 safety | Full isolated PostgreSQL and User regressions pass; no hosted data changed |
+
+PR #5 stays draft pending provider evidence and any corrections it reveals.
+TBD-18 and parent remain open. Full hosted proof with two joined testers is TBD-20
+**after** backend review, explicit founder merge approvals and merge. No reviewed
+backend deployment, production schema change or hosted verification occurred.

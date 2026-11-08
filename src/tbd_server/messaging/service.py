@@ -14,7 +14,7 @@ from psycopg.rows import dict_row
 from fastapi import Request
 
 from tbd_server.user.store import Problem
-from .adapter import TextingBlue, signed_event
+from .adapter import Comms, signed_event
 from .core import receive_message
 from .runtime import DeliveryLoop, emit
 
@@ -27,10 +27,8 @@ class Messaging:
         if self.activated_at.utcoffset() is None:
             raise ValueError("Messaging activation must include timezone")
         self.store, self.secret, self.account = store, secret, account
-        self.adapter = TextingBlue(api_key)
+        self.adapter = Comms(api_key)
         self.loop = DeliveryLoop(store.database_url, self.adapter, account, self.history_turn)
-        self.cursor = None
-        self.cursors = set()
         self.next_sweep = 0.0
         # httpx INFO URLs include history phone query params. Disable those logs.
         logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -63,6 +61,7 @@ class Messaging:
                 "receipt_commit",
                 request_id=request_id,
                 message_id=row["id"] if row else None,
+                replayed=row.get("replayed", False) if row else False,
                 duration_ms=round((monotonic() - start) * 1000, 2),
             )
             return row
@@ -81,10 +80,12 @@ class Messaging:
                     chunks.extend(chunk)
                     if len(chunks) > 512 * 1024:
                         raise Problem(413, "Webhook body too large")
-                event = signed_event(bytes(chunks), request.headers.get("x-textingblue-signature", ""), self.secret)
-                if event["type"] != "message.received":
+                event = signed_event(bytes(chunks), request.headers.get("x-osis-signature", ""), self.secret)
+                if event["event"] != "comms.message.received":
                     return {"received": True}
-                normalized = self.adapter.normalize(event.get("data"), self.account)
+                if not isinstance(event.get("data"), dict):
+                    raise Problem(422, "Invalid event data")
+                normalized = self.adapter.normalize(event["data"].get("message"), self.account)
                 if normalized is not None:
                     await asyncio.to_thread(self.receive, normalized, request_id)
                 return {"received": True}
@@ -96,25 +97,18 @@ class Messaging:
         if monotonic() < self.next_sweep:
             return False
         try:
-            page = self.adapter.history(self.account, self.cursor)
+            records = self.adapter.history(since=self.activated_at.isoformat())
             loop.last_api_at = datetime.now(timezone.utc)
-            for record in page["messages"]:
+            if len(records) >= 200:
+                emit("history_coverage_capped", count=len(records))
+            for record in reversed(records):
                 try:
-                    event = self.adapter.normalize(record, self.account)
+                    event = self.adapter.normalize(record, self.account, history=True)
                     if event is not None:
                         self.receive(event)
                 except Problem:
                     emit("history_record_rejected")
-            if page["has_more"]:
-                cursor = page.get("next_cursor")
-                if not isinstance(cursor, str) or not cursor or cursor in self.cursors:
-                    emit("history_cursor_broken")
-                    self.finish_sweep(False)
-                else:
-                    self.cursors.add(cursor)
-                    self.cursor = cursor
-            else:
-                self.finish_sweep(True)
+            self.finish_sweep(True)
         except httpx.HTTPStatusError as exc:
             if db is not None and exc.response.status_code in (401, 403, 429):
                 loop.pause_reads(db, exc.response)
@@ -126,8 +120,6 @@ class Messaging:
         return True
 
     def finish_sweep(self, success):
-        self.cursor = None
-        self.cursors.clear()
         self.next_sweep = monotonic() + 60
         if success:
             self.loop.last_history_at = datetime.now(timezone.utc)

@@ -623,33 +623,18 @@ def messaging_invitation(store, phone):
     return identity, email
 
 
-def test_messaging_join_welcome_concurrency_and_rollback(store):
-    """Actual Join transaction, restricted role and competing requests."""
-    from tbd_server.messaging.core import ensure_welcome
-
-    messaging_store = Store(store.database_url, messaging_account="+12125550000")
+def test_messaging_join_creates_zero_outbound(store):
     identity, email = messaging_invitation(store, "+12125550991")
     with ThreadPoolExecutor(max_workers=2) as executor:
-        users = list(executor.map(lambda _: messaging_store.join(identity, email), range(2)))
+        users = list(executor.map(lambda _: store.join(identity, email), range(2)))
     assert users[0]["id"] == users[1]["id"]
     with store.transaction() as cur:
-        user = Store.user(cur, users[0]["id"])
-        welcome = ensure_welcome(cur, user, "+12125550000")
-        # A changed configuration cannot create a second welcome.
-        assert ensure_welcome(cur, user, "+12125550009")["id"] == welcome["id"]
         assert (
-            cur.execute("SELECT count(*) AS n FROM messaging.messages WHERE user_id=%s", (user["id"],)).fetchone()["n"]
-            == 1
+            cur.execute("SELECT count(*) AS n FROM messaging.messages WHERE user_id=%s", (users[0]["id"],)).fetchone()[
+                "n"
+            ]
+            == 0
         )
-    with pytest.raises(RuntimeError):
-        with store.transaction() as cur:
-            from tbd_server.messaging.core import queue_message
-
-            user = Store.user(cur, users[0]["id"])
-            queue_message(cur, user, ("+12125550000", user["phone"]), "Rollback", "fake-rollback")
-            raise RuntimeError("injected before commit")
-    with store.transaction() as cur:
-        assert cur.execute("SELECT 1 FROM messaging.messages WHERE dedupe_key='fake-rollback'").fetchone() is None
 
 
 def test_messaging_private_schema_and_immutable_columns(store):
@@ -671,7 +656,9 @@ def test_messaging_inbound_replay_and_atomic_reply(store):
     identity, email = messaging_invitation(store, "+12125550992")
     user = store.join(identity, email)
     now = datetime.now(timezone.utc)
-    event = ReceivedMessage("fake-inbound-" + str(uuid4()), "+12125550000", user["phone"], " \n🙂\n ", False, now)
+    event = ReceivedMessage(
+        "fake-inbound-" + str(uuid4()), "+12125550000", user["phone"], " \n🙂\n ", False, now, "conversation_fake"
+    )
 
     def receive():
         with store.transaction() as cur:
@@ -696,7 +683,7 @@ def test_messaging_inbound_replay_and_atomic_reply(store):
 
 def test_messaging_delivery_route_order_stale_results_and_known_recovery(store):
     from tbd_server.messaging.adapter import SendResult
-    from tbd_server.messaging.core import ensure_welcome, queue_message
+    from tbd_server.messaging.core import queue_message
     from tbd_server.messaging.runtime import claim, record_send_result
 
     account = "+12125550007"
@@ -706,16 +693,22 @@ def test_messaging_delivery_route_order_stale_results_and_known_recovery(store):
     other = store.join(identity2, email2)
     with store.transaction() as cur:
         Store.user(cur, user["id"])
-        first = ensure_welcome(cur, user, account)
-        second = queue_message(cur, user, (account, user["phone"]), "second", "fake-second:" + str(user["id"]))
+        first = queue_message(
+            cur, user, (account, user["phone"], "conversation_a"), "first", "first:" + str(user["id"])
+        )
+        second = queue_message(
+            cur, user, (account, user["phone"], "conversation_a"), "second", "fake-second:" + str(user["id"])
+        )
         Store.user(cur, other["id"])
-        other_welcome = ensure_welcome(cur, other, account)
+        other_reply = queue_message(
+            cur, other, (account, other["phone"], "conversation_b"), "first", "first:" + str(other["id"])
+        )
     with store.transaction() as cur:
         claimed = claim(cur, account)
     assert claimed["id"] == first["id"]
     with store.transaction() as cur:
         # Another User progresses while the first route is awaiting an outcome.
-        assert claim(cur, account)["id"] == other_welcome["id"]
+        assert claim(cur, account)["id"] == other_reply["id"]
         assert claim(cur, account) is None
         assert not record_send_result(cur, first["id"], uuid4(), SendResult("failed"))
         assert record_send_result(cur, first["id"], claimed["attempt_id"], SendResult("provider_queued", "fake-job-1"))
@@ -741,15 +734,157 @@ def test_messaging_reply_fk_blocks_cross_user_and_inbound_state_constraints(stor
         with store.transaction() as cur:
             cur.execute(
                 """INSERT INTO messaging.messages
-                (user_id,channel,direction,dedupe_key,account_ref,peer_ref,text,state)
-                VALUES (%s,'imessage','inbound','fake-invalid',%s,%s,'text','received')""",
+                (user_id,channel,direction,dedupe_key,account_ref,peer_ref,conversation_id,text,state)
+                VALUES (%s,'imessage','inbound','fake-invalid',%s,%s,'conversation_fake','text','received')""",
                 (user["id"], account, user["phone"]),
             )
     with pytest.raises(psycopg.errors.ForeignKeyViolation):
         with store.transaction() as cur:
             cur.execute(
                 """INSERT INTO messaging.messages
-                (user_id,channel,direction,dedupe_key,account_ref,peer_ref,text,state,reply_to_message_id)
-                VALUES (%s,'imessage','outbound','fake-orphan',%s,%s,'reply','pending',%s)""",
+                (user_id,channel,direction,dedupe_key,account_ref,peer_ref,conversation_id,text,state,reply_to_message_id)
+                VALUES (%s,'imessage','outbound','fake-orphan',%s,%s,'conversation_fake','reply','pending',%s)""",
                 (user["id"], account, user["phone"], uuid4()),
             )
+
+
+def test_comms_retry_window_and_stable_uuid(store):
+    from tbd_server.messaging.core import queue_message
+    from tbd_server.messaging.runtime import claim, record_send_result
+    from tbd_server.messaging.adapter import SendResult
+
+    identity, email = messaging_invitation(store, "+12125550996")
+    user = store.join(identity, email)
+    account = "+12125550016"
+    with store.transaction() as cur:
+        Store.user(cur, user["id"])
+        original = queue_message(
+            cur, user, (account, user["phone"], "conversation_window"), "reply", "window:" + str(user["id"])
+        )
+        first = claim(cur, account)
+        record_send_result(cur, first["id"], first["attempt_id"], SendResult("pending", error_code="transport_unknown"))
+        cur.execute("UPDATE messaging.messages SET next_action_at=now() WHERE id=%s", (first["id"],))
+        second = claim(cur, account)
+        assert second["id"] == original["id"]
+        assert second["attempt_id"] != first["attempt_id"]
+        assert second["first_attempt_at"] == first["first_attempt_at"]
+        record_send_result(
+            cur, second["id"], second["attempt_id"], SendResult("pending", error_code="transport_unknown")
+        )
+        cur.execute(
+            "UPDATE messaging.messages SET first_attempt_at=now()-interval '25 hours',next_action_at=now() WHERE id=%s",
+            (original["id"],),
+        )
+        assert claim(cur, account) is None
+        held = cur.execute("SELECT * FROM messaging.messages WHERE id=%s", (original["id"],)).fetchone()
+        assert held["state"] == "uncertain" and held["error_code"] == "idempotency_expired"
+
+
+def test_comms_webhook_to_reply_with_actual_database_and_fake_provider(store):
+    from datetime import datetime, timezone
+    import hashlib
+    import hmac
+    import json
+    from unittest.mock import Mock
+    import httpx
+    from fastapi.testclient import TestClient
+    from tbd_server.user.api import create_app
+    from tbd_server.messaging.service import Messaging
+    from tbd_server.messaging.adapter import Comms
+    from tbd_server.messaging.runtime import claim, record_send_result
+    from test_messaging_adapter import inbound, outbound
+
+    identity, email = messaging_invitation(store, "+12125550997")
+    user = store.join(identity, email)
+    messaging = Messaging(store, "fake", "fake-secret", "+12125550100", "2026-11-08T00:00:00Z")
+    messaging.loop.start = Mock()
+    messaging.loop.stop = Mock()
+    record = inbound(
+        id="msg_http_database", created_at=datetime.now(timezone.utc).isoformat(), author={"external_id": user["phone"]}
+    )
+    raw = json.dumps({"event": "comms.message.received", "data": {"message": record}}).encode()
+    signature = "sha256=" + hmac.new(b"fake-secret", raw, hashlib.sha256).hexdigest()
+    with TestClient(create_app(store, Mock(), "provision", "internal", [], messaging=messaging)) as client:
+        for _ in range(2):
+            assert (
+                client.post("/webhooks/comms", content=raw, headers={"X-Osis-Signature": signature}).status_code == 200
+            )
+    with store.transaction() as cur:
+        rows = cur.execute(
+            "SELECT * FROM messaging.messages WHERE user_id=%s ORDER BY queue_sequence", (user["id"],)
+        ).fetchall()
+        assert len(rows) == 2 and rows[0]["text"] == record["body"]
+        assert rows[1]["reply_to_message_id"] == rows[0]["id"]
+        j = claim(cur, messaging.account)
+
+    def handler(request):
+        assert request.headers["idempotency-key"] == str(j["id"])
+        return httpx.Response(202, json={"message": outbound(j, status="submitted")})
+
+    adapter = Comms("fake", transport=httpx.MockTransport(handler))
+    result = adapter.send(j)
+    with store.transaction() as cur:
+        assert record_send_result(cur, j["id"], j["attempt_id"], result)
+    adapter.close()
+    messaging.adapter.close()
+
+
+def test_messaging_session_ownership_is_exclusive(store):
+    from tbd_server.messaging.runtime import LOCK_ID
+
+    with (
+        psycopg.connect(store.database_url, autocommit=True) as first,
+        psycopg.connect(store.database_url, autocommit=True) as second,
+    ):
+        assert first.execute("SELECT pg_try_advisory_lock(%s)", (LOCK_ID,)).fetchone()[0]
+        assert not second.execute("SELECT pg_try_advisory_lock(%s)", (LOCK_ID,)).fetchone()[0]
+        first.execute("SELECT pg_advisory_unlock(%s)", (LOCK_ID,))
+        assert second.execute("SELECT pg_try_advisory_lock(%s)", (LOCK_ID,)).fetchone()[0]
+
+
+def test_comms_unknown_seed_boundary_and_history_edit_preservation(store):
+    from dataclasses import replace
+    from datetime import datetime, timedelta, timezone
+    from tbd_server.messaging.core import ReceivedMessage, receive_message
+
+    identity, email = messaging_invitation(store, "+12125550998")
+    user = store.join(identity, email)
+    seed = store.seed(Seed(seed_key="comms-ineligible", name="Fake Seed", phone="+12125550999"))
+    now = datetime.now(timezone.utc)
+    event = ReceivedMessage(
+        "msg_boundaries", "+12125550100", user["phone"], "original", False, now, "conversation_boundaries"
+    )
+    with store.transaction() as cur:
+        assert (
+            receive_message(cur, replace(event, native_id="unknown", peer="+12125550989"), now - timedelta(days=1))
+            is None
+        )
+        assert (
+            receive_message(cur, replace(event, native_id="seed", peer=seed["phone"]), now - timedelta(days=1)) is None
+        )
+        assert (
+            receive_message(
+                cur,
+                replace(event, native_id="old", source_at=user["created_at"] - timedelta(seconds=1)),
+                now - timedelta(days=1),
+            )
+            is None
+        )
+        assert receive_message(cur, replace(event, native_id="inactive"), now + timedelta(seconds=1)) is None
+        original = receive_message(cur, event, now - timedelta(days=1))
+        replay = receive_message(cur, replace(event, text="edited", history=True), now - timedelta(days=1))
+        assert replay["id"] == original["id"] and replay["text"] == "original"
+        distinct = receive_message(cur, replace(event, native_id="msg_distinct_same_text"), now - timedelta(days=1))
+        assert distinct["id"] != original["id"]
+        assert (
+            cur.execute("SELECT count(*) AS n FROM messaging.messages WHERE user_id=%s", (user["id"],)).fetchone()["n"]
+            == 4
+        )
+    with pytest.raises(RuntimeError):
+        with store.transaction() as cur:
+            receive_message(cur, replace(event, native_id="msg_rollback"), now - timedelta(days=1))
+            raise RuntimeError("injected before commit")
+    with store.transaction() as cur:
+        assert (
+            cur.execute("SELECT 1 FROM messaging.messages WHERE dedupe_key='inbound:msg_rollback'").fetchone() is None
+        )

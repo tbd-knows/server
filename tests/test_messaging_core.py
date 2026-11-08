@@ -15,6 +15,7 @@ def message(**overrides):
             "account": "+12125550100",
             "peer": "+12125550101",
             "text": " \n🙂 https://example.test\n ",
+            "conversation_id": "conversation_fake",
             "unsupported": False,
             "source_at": datetime(2026, 11, 8, tzinfo=timezone.utc),
             **overrides,

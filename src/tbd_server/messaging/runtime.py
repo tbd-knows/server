@@ -8,7 +8,6 @@ from threading import Event, Thread
 from time import monotonic
 from uuid import uuid4
 
-import httpx
 import psycopg
 from psycopg.rows import dict_row
 
@@ -23,13 +22,19 @@ def emit(event, **fields):
 
 
 def claim(cur, account):
+    cur.execute(
+        """UPDATE messaging.messages SET state='uncertain',error_code='idempotency_expired',updated_at=now()
+        WHERE direction='outbound' AND account_ref=%s AND state='pending'
+        AND provider_message_id IS NULL AND first_attempt_at<=now()-interval '24 hours'""",
+        (account,),
+    )
     # Prior unresolved jobs block only their own route, including uncertain jobs.
     row = cur.execute(
         """SELECT m.* FROM messaging.messages m WHERE m.direction='outbound'
         AND m.account_ref=%s AND m.state='pending' AND m.next_action_at<=now()
         AND NOT EXISTS (SELECT 1 FROM messaging.messages prior
           WHERE prior.direction='outbound' AND prior.user_id=m.user_id
-          AND prior.account_ref=m.account_ref AND prior.channel=m.channel
+          AND prior.account_ref=m.account_ref AND prior.channel=m.channel AND prior.conversation_id=m.conversation_id
           AND prior.queue_sequence<m.queue_sequence AND prior.state NOT IN ('sent','failed'))
         AND NOT EXISTS (SELECT 1 FROM messaging.messages paused
           WHERE paused.account_ref=m.account_ref AND paused.error_code IN ('quota','account_configuration','rate_limited')
@@ -41,7 +46,7 @@ def claim(cur, account):
         return None
     return cur.execute(
         """UPDATE messaging.messages SET state='sending',attempt_id=%s,attempt_count=attempt_count+1,
-        attempt_at=now(),updated_at=now(),error_code=NULL WHERE id=%s RETURNING *""",
+        attempt_at=now(),first_attempt_at=coalesce(first_attempt_at,now()),updated_at=now(),error_code=NULL WHERE id=%s RETURNING *""",
         (uuid4(), row["id"]),
     ).fetchone()
 
@@ -61,7 +66,7 @@ def record_send_result(cur, message_id, attempt_id, result: SendResult):
     cur.execute(
         """UPDATE messaging.messages SET state=%s,provider_message_id=coalesce(%s,provider_message_id),
         error_code=%s,observed_status=%s,updated_at=now(),
-        accepted_at=CASE WHEN %s IS NOT NULL THEN coalesce(accepted_at,now()) ELSE accepted_at END,
+        accepted_at=CASE WHEN %s::text IS NOT NULL THEN coalesce(accepted_at,now()) ELSE accepted_at END,
         sent_observed_at=CASE WHEN %s='sent' THEN now() ELSE sent_observed_at END,
         next_action_at=now() + make_interval(secs => %s) WHERE id=%s""",
         (
@@ -87,11 +92,9 @@ class DeliveryLoop:
         self.last_tick = monotonic()
         self.last_api_at = None
         self.last_history_at = None
-        self.last_device_contact = None
         self.last_api = 0.0
-        self.last_send = monotonic()  # startup and ownership handoff both wait 13 seconds
+        self.last_send = monotonic()
         self.category = 0
-        self.next_number_read = 0.0
         self.pending_result = None
         self.read_pause_until = 0.0
 
@@ -132,13 +135,13 @@ class DeliveryLoop:
                         return
                     self.last_send = monotonic()
                     with self.transaction(db) as cur:
-                        cur.execute("""UPDATE messaging.messages SET state='uncertain',error_code='restart_unknown',
+                        cur.execute("""UPDATE messaging.messages SET state=CASE WHEN provider_message_id IS NULL AND first_attempt_at>now()-interval '24 hours' THEN 'pending' ELSE 'uncertain' END,error_code='restart_unknown',
                           updated_at=now() WHERE direction='outbound' AND state='sending'""")
                     if self.pending_result is not None:
                         self.save_result(db)
                     while not self.stop_event.is_set():
                         self.last_tick = monotonic()
-                        if monotonic() - self.last_api < 2.1:
+                        if monotonic() - self.last_api < 1.1:
                             self.stop_event.wait(0.2)
                             continue
                         self.turn(db)
@@ -154,7 +157,7 @@ class DeliveryLoop:
 
     def pause_reads(self, db, response):
         code = "rate_limited" if response.status_code == 429 else "account_configuration"
-        delay = retry_after(response) if response.status_code == 429 else 30
+        delay = retry_after(response) if response.status_code == 429 else 60
         self.read_pause_until = monotonic() + delay
         with self.transaction(db) as cur:
             cur.execute(
@@ -176,37 +179,20 @@ class DeliveryLoop:
             ).fetchone()
         if paused:
             return
-        self.category = (self.category + 1) % 4
-        if self.category == 3:
-            if monotonic() < self.next_number_read:
-                return
-            self.next_number_read = monotonic() + 60
-            with self.transaction(db) as cur:
-                counts = cur.execute("""SELECT state,count(*) AS count FROM messaging.messages
-                    WHERE direction='outbound' GROUP BY state""").fetchall()
-            emit(
-                "queue_snapshot",
-                counts={row["state"]: row["count"] for row in counts},
-                last_api_at=self.last_api_at,
-                last_history_at=self.last_history_at,
-                last_device_contact=self.last_device_contact,
-            )
-            try:
-                number = self.adapter.number_status(self.account)
-                self.last_device_contact = number.get("last_seen_at")
-                self.last_api_at = datetime.now(timezone.utc)
-                emit("device_status", last_device_contact=self.last_device_contact)
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code in (401, 403, 429):
-                    self.pause_reads(db, exc.response)
-                emit("number_status_unavailable")
-            except (httpx.HTTPError, ValueError, KeyError, TypeError):
-                emit("number_status_unavailable")
-            self.last_api = monotonic()
-            return
+        self.category = (self.category + 1) % 3
         if self.category == 0:
             if self.history_turn(self, db):
                 self.last_api = monotonic()
+                with self.transaction(db) as cur:
+                    counts = cur.execute(
+                        "SELECT state,count(*) AS count FROM messaging.messages WHERE direction='outbound' GROUP BY state"
+                    ).fetchall()
+                emit(
+                    "queue_snapshot",
+                    counts={r["state"]: r["count"] for r in counts},
+                    last_api_at=self.last_api_at,
+                    last_history_at=self.last_history_at,
+                )
             return
         if self.category == 1:
             with self.transaction(db) as cur:
@@ -220,9 +206,9 @@ class DeliveryLoop:
             if job is None:
                 return
             api_started = monotonic()
-            result = self.adapter.status(job["provider_message_id"], job["account_ref"], job["peer_ref"], job["text"])
+            result = self.adapter.status(job)
         else:
-            if monotonic() - self.last_send < 13:
+            if monotonic() - self.last_send < 1.1:
                 return
             with self.transaction(db) as cur:
                 job = claim(cur, self.account)
@@ -235,7 +221,7 @@ class DeliveryLoop:
                 queue_age_seconds=(datetime.now(timezone.utc) - job["created_at"]).total_seconds(),
             )
             api_started = monotonic()
-            result = self.adapter.send(job["account_ref"], job["peer_ref"], job["text"])
+            result = self.adapter.send(job)
             self.last_send = monotonic()
         self.last_api = monotonic()
         if result.error_code not in ("transport_unknown", "read_unavailable"):
@@ -247,6 +233,8 @@ class DeliveryLoop:
             duration_ms=round((monotonic() - api_started) * 1000, 2),
             state=result.state,
         )
+        if result.state == "uncertain" and result.provider_id is None:
+            result = SendResult("pending", error_code=result.error_code, retry_after=result.retry_after)
         self.pending_result = (job, result)
         self.save_result(db)
 

@@ -6,12 +6,12 @@ from .user.auth import Auth
 from .user.store import Store
 from .messaging.service import Messaging
 
-store = Store(os.environ["DATABASE_URL"], messaging_account=os.environ["TEXTING_BLUE_PHONE_NUMBER"])
+store = Store(os.environ["DATABASE_URL"])
 messaging = Messaging(
     store,
-    os.environ["TEXTING_BLUE_API_KEY"],
-    os.environ["TEXTING_BLUE_WEBHOOK_SECRET"],
-    os.environ["TEXTING_BLUE_PHONE_NUMBER"],
+    os.environ["COMMS_API_KEY"],
+    os.environ["COMMS_WEBHOOK_SECRET"],
+    os.environ["COMMS_LINE_E164"],
     os.environ["MESSAGING_ACTIVATED_AT"],
 )
 print(json.dumps({"database_connection_verified": store.verify_connection()}), flush=True)

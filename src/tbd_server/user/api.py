@@ -112,7 +112,7 @@ def create_app(store, auth, provisioning_token: str, internal_token: str, origin
         return {"status": "ok"}
 
     if messaging is not None:
-        app.add_api_route("/webhooks/texting-blue", messaging.webhook, methods=["POST"])
+        app.add_api_route("/webhooks/comms", messaging.webhook, methods=["POST"])
 
     @app.post(
         "/internal/invitations",
