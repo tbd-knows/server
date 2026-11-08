@@ -35,16 +35,31 @@ def main():
             existing.raise_for_status()
             # Avoid creating duplicate registrations after an uncertain response.
             hooks = existing.json()["webhooks"]
-            if any(h.get("url") == args.url for h in hooks):
-                raise SystemExit("Endpoint already registered; preserve its secret and reconcile privately")
-            response = client.post(
-                "webhooks", json={"url": args.url, "events": ["comms.message.received", "comms.ping"]}
-            )
-            response.raise_for_status()
-            webhook = response.json()["webhook"]
-            with (root / "webhook-secret").open("x") as file:
+            metadata_file = root / "registration.private.json"
+            if metadata_file.exists():
+                previous = json.loads(metadata_file.read_text())
+                if previous["url"] != args.url and any(
+                    h.get("id") == previous["id"] and h.get("active", True) for h in hooks
+                ):
+                    raise SystemExit("Disable the old capture webhook in Comms before replacing its URL")
+            webhook = next((h for h in hooks if h.get("url") == args.url), None)
+            if webhook is None:
+                response = client.post(
+                    "webhooks", json={"url": args.url, "events": ["comms.message.received", "comms.ping"]}
+                )
+                response.raise_for_status()
+                webhook = response.json()["webhook"]
+            elif not webhook.get("active", True):
+                raise SystemExit("Existing capture webhook is disabled; re-enable it before requesting a ping")
+            # Listing returns the signing secret, so an uncertain setup can recover
+            # without creating another subscription. Replace the secret atomically.
+            import tempfile
+
+            with tempfile.NamedTemporaryFile(mode="w", dir=root, delete=False) as file:
                 os.chmod(file.name, 0o600)
                 file.write(webhook["secret"])
+                temporary = Path(file.name)
+            temporary.replace(root / "webhook-secret")
             metadata = {"id": webhook["id"], "url": args.url}
             (root / "registration.private.json").write_text(json.dumps(metadata))
             os.chmod(root / "registration.private.json", 0o600)
