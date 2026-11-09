@@ -40,14 +40,23 @@ HTTP 501 with actual code `backdrop_unsupported`; no backdrop rollout is include
   no-ID claim uses the same key/payload; after 24 hours from first attempt it holds
   uncertain for reconciliation, without a replacement key. Known IDs use only
   exact-ID history on the same route and saved card body, including an empty body.
+  A 409 idempotency_in_progress retries with backoff and the same key/payload
+  within that window; idempotency_key_reused is terminal.
 - Completed outcomes are retained across result-commit retries and flushed on
   orderly shutdown. Stale attempt results and terminal regressions are ignored.
   Card state/errors live only in the ledger. Ordinary card rejection or transport
   failure cannot mutate, fail, retry or block a reply's route. Shared-account
-  auth/quota/rate-limit responses still pause provider work for the existing
-  60/3600/retry-after durations; these flags stay in the card ledger, not replies.
-- Rollout defaults off. Enabling requires a verified existing-card import matching
-  a configured pair. Discovery runs on startup/idle and at most once a minute,
+  limits still pause provider work: HTTP 401, HTTP 429, or HTTP 402 with the
+  documented channel_entitlement_denied quota code. These use explicit
+  card_account_* markers and the existing 60/3600/retry-after durations. Other
+  402/403 responses (including absent/non-JSON bodies) are card-only; a card read
+  restriction retains known-ID uncertainty without blocking replies or history.
+- Rollout defaults off. First enablement requires a verified existing-card import
+  for the configured line. Missing import/schema/permissions hold only card work,
+  with a safe card_rollout_held log; User Service and normal delivery still start.
+  A historical import remains valid after its pair is removed; every new card
+  claim still requires the current approved pair and canonical joined User. Discovery runs on startup/idle and at most once a
+  minute,
   reset immediately when a normal reply becomes sent. Updated approved-pair config
   takes effect on restart; a new eligible thread qualifies after its first sent
   reply. Card failures emit safe card_id/state/error logs without contacts/bodies.
@@ -95,8 +104,10 @@ HTTP 501 with actual code `backdrop_unsupported`; no backdrop rollout is include
    and stop. Do not replace A's key or send it another card.
 5. Set `COMMS_CONTACT_CARDS_ENABLED=true` with Dashboard **Save only**. Recheck
    the private A import, mappings, artwork digest and pending config. Deploy the
-   final merged SHA once. Startup requires the imported record; verify exact
-   commit, runtime role/TLS, loop ownership, health and safe card logs. No second
+   final merged SHA once. Verify exact commit, runtime role/TLS, loop ownership
+   and health. Verify the imported record and absence of card_rollout_held before
+   claiming card rollout readiness; healthy API startup alone is not sufficient. No
+   second
    deploy is needed just to turn this rollout on.
 6. Verify B gets one saveable TBD card/logo, A gets no second card, and each is
    represented by its own ledger entry. B is already eligible from its existing
@@ -115,7 +126,8 @@ HTTP 501 with actual code `backdrop_unsupported`; no backdrop rollout is include
 
 The disposable PostgreSQL harness applies the additive migration over released
 User/Messaging schemas and preserves User data/grants. Focused tests cover seeded
-A, existing/new eligibility, import CLI GET-only behavior, startup guard, concurrent
+A, existing/new eligibility, import CLI GET-only behavior, card-only prerequisite
+holds/historical-import retention, concurrent
 claims, global in-flight lease, restart/key window, exact-ID status and stale
 results, permissions, shared-account pause isolation, blocked card I/O with a
 normal reply progressing, and result-commit retry without another POST. Provider
@@ -124,3 +136,8 @@ requests are controlled fixtures; automated tests never send live cards.
 [Send-card API](https://docs.osis.co/messages-api/send-contact-card) differs from
 [dedicated-line name/photo sharing](https://docs.osis.co/messages-api/set-contact-card).
 Recipient saving and Messages display remain handset evidence, not an API guarantee.
+
+Review regressions also exercise due normal replies/history after card-only 402/403,
+actual app startup and B replies with missing import or A removed after import,
+and recoverable versus terminal 409 conflicts with unchanged keys/payloads.
+See [provider error semantics](https://docs.osis.co/guides/errors-and-rate-limits).

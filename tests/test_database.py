@@ -1225,6 +1225,8 @@ def card_thread(store):
     yield context
     with psycopg.connect(os.environ["TEST_DATABASE_URL"]) as db:
         db.execute("DELETE FROM messaging.contact_cards WHERE user_id=%s", (user["id"],))
+        db.execute("DELETE FROM messaging.messages WHERE user_id=%s AND direction='outbound'", (user["id"],))
+        db.execute("DELETE FROM messaging.messages WHERE user_id=%s AND direction='inbound'", (user["id"],))
 
 
 def test_cards_existing_new_threads_and_replay(card_thread):
@@ -1519,8 +1521,8 @@ def test_cards_enabled_startup_requires_imported_pilot_record(card_thread):
         cards_enabled=True,
     )
     try:
-        with pytest.raises(Problem, match="Import verified"):
-            service.verify_schema()
+        service.verify_schema()
+        assert service.loop.card_pairs is None
         digest, key = identity(c["account"], c["conversation"])
         evidence = {
             "conversation_id": c["conversation"],
@@ -1543,6 +1545,7 @@ def test_cards_enabled_startup_requires_imported_pilot_record(card_thread):
                 SendResult("sent", evidence["provider_message_id"], observed_status="sent", response_body=""),
             )
         service.verify_schema()
+        assert service.loop.card_pairs == c["pairs"]
     finally:
         service.adapter.close()
 
@@ -1645,7 +1648,7 @@ def test_card_quota_only_records_ledger_and_honors_shared_account_pause(card_thr
         before = cur.execute("SELECT * FROM messaging.messages WHERE id=%s", (c["reply_id"],)).fetchone()
         enqueue(cur, c["account"], c["pairs"])
         job = claim_card(cur, c["account"], c["pairs"])
-        record_card_result(cur, job, SendResult("pending", error_code="quota", retry_after=3600))
+        record_card_result(cur, job, SendResult("pending", error_code="card_account_quota", retry_after=3600))
         assert cur.execute("SELECT * FROM messaging.messages WHERE id=%s", (c["reply_id"],)).fetchone() == before
     adapter = Mock()
     loop = DeliveryLoop(c["store"].database_url, adapter, c["account"], lambda *_: False, card_pairs=c["pairs"])
@@ -1681,3 +1684,243 @@ def test_card_orderly_stop_flushes_completed_outcome(card_thread):
             cur.execute("SELECT state FROM messaging.messages WHERE id=%s", (c["reply_id"],)).fetchone()["state"]
             == "sent"
         )
+
+
+@pytest.mark.parametrize("status,code", [(402, "dedicated_line_required"), (403, "feature_disabled")])
+def test_card_only_rejection_does_not_pause_due_reply_or_history(card_thread, status, code):
+    import json
+    import httpx
+    from unittest.mock import Mock
+    from tbd_server.messaging.cards import enqueue, claim_card, record_card_result
+    from tbd_server.messaging.adapter import Comms
+    from tbd_server.messaging.runtime import DeliveryLoop
+
+    c = card_thread
+    requests = []
+
+    def provider(request):
+        requests.append(request)
+        if request.url.path.endswith("/contact-cards"):
+            return httpx.Response(status, json={"code": code})
+        assert request.url.path.endswith("/messages") and request.method == "POST"
+        data = json.loads(request.content)
+        return httpx.Response(
+            202,
+            json={
+                "message": {
+                    "id": "fake-after-restriction-" + str(uuid4()),
+                    "conversation_id": data["conversation_id"],
+                    "line_e164": c["account"],
+                    "direction": "outbound",
+                    "channel": "imessage",
+                    "body": data["body"],
+                    "status": "sent",
+                }
+            },
+        )
+
+    adapter = Comms("fake", transport=httpx.MockTransport(provider))
+    try:
+        with c["store"].transaction() as cur:
+            enqueue(cur, c["account"], c["pairs"])
+            card = claim_card(cur, c["account"], c["pairs"])
+        result = adapter.send_card(card)
+        assert result.error_code == "card_restricted"
+        with c["store"].transaction() as cur:
+            record_card_result(cur, card, result)
+            cur.execute(
+                "UPDATE messaging.messages SET state='pending',attempt_id=NULL,provider_message_id=NULL,next_action_at=now() WHERE id=%s",
+                (c["reply_id"],),
+            )
+        history = Mock(return_value=False)
+        loop = DeliveryLoop(c["store"].database_url, adapter, c["account"], history, card_pairs=c["pairs"])
+        loop.category = 1
+        loop.last_send = 0
+        with psycopg.connect(c["store"].database_url, autocommit=True, row_factory=psycopg.rows.dict_row) as db:
+            loop.turn(db)
+            assert (
+                db.execute("SELECT state FROM messaging.messages WHERE id=%s", (c["reply_id"],)).fetchone()["state"]
+                == "sent"
+            )
+            loop.turn(db)
+            history.assert_called_once()
+            assert (
+                db.execute("SELECT state FROM messaging.contact_cards WHERE id=%s", (card["id"],)).fetchone()["state"]
+                == "failed"
+            )
+        assert len(requests) == 2
+    finally:
+        adapter.close()
+
+
+@pytest.mark.parametrize("code", ["idempotency_in_progress", "idempotency_key_reused"])
+def test_card_conflict_recovery_persists_original_key_and_backoff(card_thread, code):
+    import httpx
+    from tbd_server.messaging.cards import enqueue, claim_card, record_card_result
+    from tbd_server.messaging.adapter import Comms
+
+    c = card_thread
+    requests = []
+
+    def provider(request):
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(409, json={"code": code})
+        return httpx.Response(
+            200,
+            json={
+                "contact_card": {"name": "TBD", "phone": c["account"]},
+                "message": {
+                    "id": "fake-conflict-card-" + str(uuid4()),
+                    "conversation_id": c["conversation"],
+                    "line_e164": c["account"],
+                    "direction": "outbound",
+                    "channel": "imessage",
+                    "body": "",
+                    "status": "sent",
+                },
+            },
+        )
+
+    adapter = Comms("fake", transport=httpx.MockTransport(provider))
+    try:
+        with c["store"].transaction() as cur:
+            enqueue(cur, c["account"], c["pairs"])
+            first = claim_card(cur, c["account"], c["pairs"])
+        result = adapter.send_card(first)
+        with c["store"].transaction() as cur:
+            record_card_result(cur, first, result)
+            row = cur.execute("SELECT * FROM messaging.contact_cards WHERE id=%s", (first["id"],)).fetchone()
+            assert claim_card(cur, c["account"], c["pairs"]) is None
+            if code == "idempotency_key_reused":
+                assert row["state"] == "failed" and row["error_code"] == code
+                return
+            assert row["state"] == "pending" and row["error_code"] == code and row["next_action_at"] > row["updated_at"]
+            cur.execute("UPDATE messaging.contact_cards SET next_action_at=now() WHERE id=%s", (first["id"],))
+            retry = claim_card(cur, c["account"], c["pairs"])
+            assert retry["first_attempt_at"] == first["first_attempt_at"]
+            assert (
+                retry["idempotency_key"] == first["idempotency_key"]
+                and retry["payload_sha256"] == first["payload_sha256"]
+            )
+        observed = adapter.send_card(retry)
+        with c["store"].transaction() as cur:
+            assert record_card_result(cur, retry, observed)
+        assert requests[0].headers["Idempotency-Key"] == requests[1].headers["Idempotency-Key"]
+        assert requests[0].content == requests[1].content
+        assert observed.state == "sent"
+    finally:
+        adapter.close()
+
+
+@pytest.mark.parametrize("import_a", [False, True])
+def test_card_prerequisites_never_prevent_app_start_or_b_replies(card_thread, import_a):
+    import hashlib
+    import hmac
+    import json
+    import time
+    from datetime import datetime, timezone
+    from unittest.mock import Mock
+    import httpx
+    from fastapi.testclient import TestClient
+    from tbd_server.messaging.cards import identity, PHOTO_SHA, import_verified
+    from tbd_server.messaging.adapter import Comms, SendResult
+    from tbd_server.messaging.service import Messaging
+    from tbd_server.user.api import create_app
+    from test_messaging_adapter import inbound
+
+    c = card_thread
+    if import_a:
+        digest, key = identity(c["account"], c["conversation"])
+        native = "fake-historical-import-" + str(uuid4())
+        evidence = {
+            "conversation_id": c["conversation"],
+            "attempt_state": "accepted",
+            "payload_sha256": digest,
+            "idempotency_key": key,
+            "photo_sha256": PHOTO_SHA,
+            "provider_message_id": native,
+        }
+        with c["store"].transaction() as cur:
+            import_verified(
+                cur,
+                c["account"],
+                c["pairs"],
+                evidence,
+                {
+                    "card_received_in_original_thread_confirmed": True,
+                    "saved_contact_logo_visible_in_messages_confirmed": True,
+                },
+                SendResult("sent", native, observed_status="sent", response_body=""),
+            )
+    entry, auth_id = approved(c["store"])
+    user = c["store"].join(auth_id, entry["email"])
+    b_conversation = "fake-approved-b-" + str(uuid4())
+    b_pair = {b_conversation: user["phone"]}
+    service = Messaging(
+        c["store"],
+        "fake",
+        "fake-secret",
+        c["account"],
+        "2026-11-08T00:00:00Z",
+        pilot_conversations=b_pair,
+        cards_enabled=True,
+    )
+
+    def provider(request):
+        if request.method == "GET":
+            return httpx.Response(200, json={"messages": []})
+        if request.url.path.endswith("/contact-cards"):
+            return httpx.Response(403, json={"code": "feature_disabled"})
+        data = json.loads(request.content)
+        return httpx.Response(
+            202,
+            json={
+                "message": {
+                    "id": "fake-live-b-reply-" + str(uuid4()),
+                    "conversation_id": data["conversation_id"],
+                    "line_e164": c["account"],
+                    "direction": "outbound",
+                    "channel": "imessage",
+                    "body": data["body"],
+                    "status": "sent",
+                }
+            },
+        )
+
+    service.adapter.close()
+    service.adapter = Comms("fake", transport=httpx.MockTransport(provider))
+    service.loop.adapter = service.adapter
+    auth = Mock()
+    auth.verified_identity.return_value = (auth_id, entry["email"])
+    app = create_app(c["store"], auth, "fake-provision", "fake-internal", [], messaging=service)
+    try:
+        with TestClient(app) as client:
+            assert client.get("/healthz").status_code == 200
+            assert service.loop.card_pairs == (b_pair if import_a else None)
+            assert client.post("/v1/join", headers={"Authorization": "Bearer fake"}).json()["id"] == str(user["id"])
+            record = inbound(
+                id="fake-prerequisite-b-" + str(uuid4()),
+                conversation_id=b_conversation,
+                line_e164=c["account"],
+                author={"external_id": user["phone"]},
+                created_at=datetime.now(timezone.utc).isoformat(),
+            )
+            raw = json.dumps({"event": "comms.message.received", "data": {"message": record}}).encode()
+            sig = "sha256=" + hmac.new(b"fake-secret", raw, hashlib.sha256).hexdigest()
+            assert client.post("/webhooks/comms", content=raw, headers={"X-Osis-Signature": sig}).status_code == 200
+            deadline = time.monotonic() + 8
+            while True:
+                with c["store"].transaction() as cur:
+                    reply = cur.execute(
+                        "SELECT * FROM messaging.messages WHERE user_id=%s AND direction='outbound'", (user["id"],)
+                    ).fetchone()
+                if reply and reply["state"] == "sent":
+                    break
+                assert time.monotonic() < deadline, "normal B reply stalled"
+                time.sleep(0.02)
+            assert reply["attempt_count"] == 1
+            assert client.get("/healthz").status_code == 200
+    finally:
+        with psycopg.connect(os.environ["TEST_DATABASE_URL"]) as db:
+            db.execute("DELETE FROM messaging.contact_cards WHERE user_id=%s", (user["id"],))

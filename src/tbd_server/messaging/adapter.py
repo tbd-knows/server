@@ -246,16 +246,15 @@ class Comms:
             )
         except httpx.HTTPError:
             return SendResult("pending", error_code="transport_unknown")
-        if response.status_code == 429:
-            return SendResult("pending", error_code="rate_limited", retry_after=retry_after(response))
-        if response.status_code == 402:
-            return SendResult("pending", error_code="quota", retry_after=3600)
-        if response.status_code in (401, 403):
-            return SendResult("pending", error_code="account_configuration", retry_after=60)
+        if response.status_code in (401, 429):
+            return self.card_error(response, {})
         try:
             data = response.json()
         except ValueError:
-            return SendResult("pending", error_code="invalid_response")
+            data = {}
+        error = self.card_error(response, data, job.get("attempt_count", 0))
+        if error is not None:
+            return error
         if response.status_code in (200, 201, 202) and isinstance(data, dict):
             card, message = data.get("contact_card"), data.get("message")
             if (
@@ -271,9 +270,55 @@ class Comms:
                 result = self.classify(message, {**job, "text": message["body"]})
                 return replace(result, response_body=message["body"] if result.provider_id else None)
             return SendResult("pending", error_code="invalid_card_response")
+        return SendResult("pending", error_code="invalid_card_response")
+
+    @staticmethod
+    def card_error(response, data, attempt_count=0):
+        # HTTP 402/403 also describe card/feature/line restrictions. An absent
+        # or ambiguous body must not create an account-wide reply/history pause.
+        if response.status_code == 401:
+            return SendResult("pending", error_code="card_account_configuration", retry_after=60)
+        if response.status_code == 429:
+            return SendResult("pending", error_code="card_account_rate_limited", retry_after=retry_after(response))
+        data = data if isinstance(data, dict) else {}
+        code = data.get("code") or data.get("error")
+        if response.status_code == 402 and code == "channel_entitlement_denied":
+            # The documented workspace message allowance exhaustion code.
+            return SendResult("pending", error_code="card_account_quota", retry_after=3600)
+        if response.status_code in (402, 403):
+            return SendResult("failed", error_code="card_restricted")
+        if response.status_code == 409 and code == "idempotency_in_progress":
+            delay = retry_after(response) if "retry_after" in data else min(30, 2 ** min(attempt_count, 5))
+            return SendResult("pending", error_code="idempotency_in_progress", retry_after=delay)
+        if response.status_code == 409 and code == "idempotency_key_reused":
+            return SendResult("failed", error_code="idempotency_key_reused")
         if response.status_code >= 500:
             return SendResult("pending", error_code="provider_retry")
-        return SendResult("failed", error_code="request_rejected")
+        if response.status_code not in (200, 201, 202):
+            return SendResult("failed", error_code="request_rejected")
+        return None
 
     def card_status(self, job):
-        return replace(self.status({**job, "text": job["response_body"]}), response_body=job["response_body"])
+        try:
+            records = self.history(conversation=job["conversation_id"], direction="outbound")
+        except httpx.HTTPStatusError as exc:
+            try:
+                data = exc.response.json()
+            except ValueError:
+                data = {}
+            error = self.card_error(exc.response, data) or SendResult("uncertain", error_code="read_unavailable")
+            return replace(
+                error, state="uncertain", provider_id=job["provider_message_id"], response_body=job["response_body"]
+            )
+        except (httpx.HTTPError, ValueError):
+            return SendResult(
+                "uncertain", job["provider_message_id"], "read_unavailable", response_body=job["response_body"]
+            )
+        for record in records:
+            if isinstance(record, dict) and record.get("id") == job["provider_message_id"]:
+                return replace(
+                    self.classify(record, {**job, "text": job["response_body"]}), response_body=job["response_body"]
+                )
+        return SendResult(
+            "uncertain", job["provider_message_id"], "history_missing", response_body=job["response_body"]
+        )

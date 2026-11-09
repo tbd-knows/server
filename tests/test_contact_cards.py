@@ -78,10 +78,8 @@ def test_card_payload_and_empty_body_history_use_verified_shape():
 @pytest.mark.parametrize(
     "code,delay,error",
     [
-        (401, 60, "account_configuration"),
-        (403, 60, "account_configuration"),
-        (402, 3600, "quota"),
-        (429, 60, "rate_limited"),
+        (401, 60, "card_account_configuration"),
+        (429, 60, "card_account_rate_limited"),
     ],
 )
 @pytest.mark.parametrize("body", [b"", b"<html>unavailable</html>"])
@@ -89,6 +87,52 @@ def test_card_account_pauses_before_json(code, delay, error, body):
     adapter = Comms("fake", transport=httpx.MockTransport(lambda _: httpx.Response(code, content=body)))
     result = adapter.send_card(card_job())
     assert result == SendResult("pending", error_code=error, retry_after=delay)
+    adapter.close()
+
+
+@pytest.mark.parametrize("code", [402, 403])
+@pytest.mark.parametrize(
+    "data", [{"code": "dedicated_line_required"}, {"error": "feature_disabled"}, {"code": "line_not_owned"}, {}]
+)
+def test_card_restrictions_are_not_shared_account_limits(code, data):
+    adapter = Comms("fake", transport=httpx.MockTransport(lambda _: httpx.Response(code, json=data)))
+    assert adapter.send_card(card_job()) == SendResult("failed", error_code="card_restricted")
+    read = adapter.card_status(card_job(provider_message_id="known-card", response_body=""))
+    assert read.state == "uncertain" and read.error_code == "card_restricted" and read.provider_id == "known-card"
+    adapter.close()
+
+
+@pytest.mark.parametrize("code", [402, 403])
+@pytest.mark.parametrize("body", [b"", b"<html>unavailable</html>"])
+def test_card_ambiguous_restrictions_do_not_pause_replies(code, body):
+    adapter = Comms("fake", transport=httpx.MockTransport(lambda _: httpx.Response(code, content=body)))
+    assert adapter.send_card(card_job()).error_code == "card_restricted"
+    adapter.close()
+
+
+def test_card_confirmed_quota_and_conflict_classification():
+    responses = iter(
+        [
+            httpx.Response(402, json={"code": "channel_entitlement_denied"}),
+            httpx.Response(409, json={"error": "idempotency_in_progress"}),
+            httpx.Response(409, json={"code": "idempotency_in_progress", "retry_after": 7}),
+            httpx.Response(409, json={"code": "idempotency_key_reused"}),
+        ]
+    )
+    requests = []
+
+    def provider(request):
+        requests.append(request)
+        return next(responses)
+
+    adapter = Comms("fake", transport=httpx.MockTransport(provider))
+    job = card_job(attempt_count=2)
+    assert adapter.send_card(job) == SendResult("pending", error_code="card_account_quota", retry_after=3600)
+    assert adapter.send_card(job) == SendResult("pending", error_code="idempotency_in_progress", retry_after=4)
+    assert adapter.send_card(job).retry_after == 7
+    assert adapter.send_card(job) == SendResult("failed", error_code="idempotency_key_reused")
+    assert len({r.headers["Idempotency-Key"] for r in requests}) == 1
+    assert len({r.content for r in requests}) == 1
     adapter.close()
 
 

@@ -212,7 +212,7 @@ class DeliveryLoop:
                 with self.transaction(db) as cur:
                     card_pause = cur.execute(
                         """SELECT 1 FROM messaging.contact_cards WHERE account_ref=%s
-                        AND error_code IN ('account_configuration','rate_limited','quota')
+                        AND error_code IN ('card_account_configuration','card_account_rate_limited','card_account_quota')
                         AND next_action_at>now() LIMIT 1""",
                         (self.account,),
                     ).fetchone()

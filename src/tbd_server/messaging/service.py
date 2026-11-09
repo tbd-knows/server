@@ -63,22 +63,35 @@ class Messaging:
                 "SELECT has_column_privilege(current_user,'messaging.messages','state','UPDATE') AS ok"
             ).fetchone()["ok"]:
                 raise Problem(503, "Messaging delivery permissions missing")
-            if self.cards_enabled:
+        if self.cards_enabled:
+            self.loop.card_pairs = self.pilot_conversations if self.cards_ready() else None
+
+    def cards_ready(self):
+        # Card prerequisites are optional for the API and normal delivery loop.
+        # An imported historical proof remains valid if its pair is later removed.
+        try:
+            with self.store.transaction() as cur:
                 if not cur.execute(
                     """SELECT has_table_privilege(current_user,'messaging.contact_cards','INSERT')
                     AND has_column_privilege(current_user,'messaging.contact_cards','state','UPDATE') AS ok"""
                 ).fetchone()["ok"]:
-                    raise Problem(503, "Contact-card ledger permissions missing")
+                    emit("card_rollout_held", reason="ledger_permissions")
+                    return False
                 # The first rollout must import Pilot A before sends can start.
                 # No real conversation/provider identifiers belong in a migration.
                 imported = cur.execute(
-                    """SELECT conversation_id,peer_ref FROM messaging.contact_cards
+                    """SELECT 1 FROM messaging.contact_cards
                     WHERE account_ref=%s AND state='sent' AND attempt_count=0
-                    AND provider_message_id IS NOT NULL""",
+                    AND provider_message_id IS NOT NULL LIMIT 1""",
                     (self.account,),
-                ).fetchall()
-                if not any(self.pilot_conversations.get(r["conversation_id"]) == r["peer_ref"] for r in imported):
-                    raise Problem(503, "Import verified existing contact card before enabling rollout")
+                ).fetchone()
+                if not imported:
+                    emit("card_rollout_held", reason="import_required")
+                    return False
+                return True
+        except (psycopg.Error, Problem):
+            emit("card_rollout_held", reason="ledger_unavailable")
+            return False
 
     def receive(self, event, request_id=None):
         start = monotonic()
