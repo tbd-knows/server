@@ -20,7 +20,7 @@ from .runtime import DeliveryLoop, emit
 
 
 class Messaging:
-    def __init__(self, store, api_key, secret, account, activated_at, *, pilot_conversations=None):
+    def __init__(self, store, api_key, secret, account, activated_at, *, pilot_conversations=None, cards_enabled=False):
         if not api_key or not secret or not re.fullmatch(r"\+[1-9][0-9]{7,14}", account):
             raise ValueError("Messaging credentials and E.164 number required")
         self.activated_at = datetime.fromisoformat(activated_at.replace("Z", "+00:00"))
@@ -39,7 +39,14 @@ class Messaging:
         self.pilot_conversations = dict(pilot_conversations)
         self.store, self.secret, self.account = store, secret, account
         self.adapter = Comms(api_key)
-        self.loop = DeliveryLoop(store.database_url, self.adapter, account, self.history_turn)
+        self.cards_enabled = cards_enabled
+        self.loop = DeliveryLoop(
+            store.database_url,
+            self.adapter,
+            account,
+            self.history_turn,
+            card_pairs=self.pilot_conversations if cards_enabled else None,
+        )
         self.next_sweep = 0.0
         # httpx INFO URLs include history phone query params. Disable those logs.
         logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -56,6 +63,35 @@ class Messaging:
                 "SELECT has_column_privilege(current_user,'messaging.messages','state','UPDATE') AS ok"
             ).fetchone()["ok"]:
                 raise Problem(503, "Messaging delivery permissions missing")
+        if self.cards_enabled:
+            self.loop.card_pairs = self.pilot_conversations if self.cards_ready() else None
+
+    def cards_ready(self):
+        # Card prerequisites are optional for the API and normal delivery loop.
+        # An imported historical proof remains valid if its pair is later removed.
+        try:
+            with self.store.transaction() as cur:
+                if not cur.execute(
+                    """SELECT has_table_privilege(current_user,'messaging.contact_cards','INSERT')
+                    AND has_column_privilege(current_user,'messaging.contact_cards','state','UPDATE') AS ok"""
+                ).fetchone()["ok"]:
+                    emit("card_rollout_held", reason="ledger_permissions")
+                    return False
+                # The first rollout must import Pilot A before sends can start.
+                # No real conversation/provider identifiers belong in a migration.
+                imported = cur.execute(
+                    """SELECT 1 FROM messaging.contact_cards
+                    WHERE account_ref=%s AND state='sent' AND attempt_count=0
+                    AND provider_message_id IS NOT NULL LIMIT 1""",
+                    (self.account,),
+                ).fetchone()
+                if not imported:
+                    emit("card_rollout_held", reason="import_required")
+                    return False
+                return True
+        except (psycopg.Error, Problem):
+            emit("card_rollout_held", reason="ledger_unavailable")
+            return False
 
     def receive(self, event, request_id=None):
         start = monotonic()

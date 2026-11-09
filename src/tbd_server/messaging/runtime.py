@@ -1,6 +1,7 @@
 """One session-owned delivery loop; no database transaction spans provider I/O."""
 
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import json
 import logging
@@ -94,7 +95,7 @@ def record_send_result(cur, message_id, attempt_id, result: SendResult):
 
 
 class DeliveryLoop:
-    def __init__(self, database_url, adapter, account, history_turn):
+    def __init__(self, database_url, adapter, account, history_turn, *, card_pairs=None):
         self.database_url, self.adapter, self.account = database_url, adapter, account
         self.history_turn = history_turn
         self.stop_event = Event()
@@ -107,6 +108,10 @@ class DeliveryLoop:
         self.category = 0
         self.pending_result = None
         self.read_pause_until = 0.0
+        self.card_pairs = None if card_pairs is None else dict(card_pairs)
+        self.card_executor = None
+        self.card_operation = None
+        self.next_card_scan = 0.0
 
     def start(self):
         self.thread = Thread(target=self.run, name="messaging-delivery", daemon=True)
@@ -118,6 +123,16 @@ class DeliveryLoop:
             self.thread.join(timeout=35)
         if self.thread and self.thread.is_alive():
             raise RuntimeError("Messaging loop did not stop")
+        if self.card_executor:
+            self.card_executor.shutdown(wait=True)
+            if self.card_operation is not None:
+                try:
+                    with psycopg.connect(
+                        self.database_url, autocommit=True, row_factory=dict_row, connect_timeout=2
+                    ) as db:
+                        self.finish_card(db)
+                except psycopg.Error:
+                    emit("card_shutdown_commit_unavailable")
         self.adapter.close()
 
     def healthy(self):
@@ -179,6 +194,9 @@ class DeliveryLoop:
             )
 
     def turn(self, db):
+        # Result storage is independent of reply state and survives reconnects.
+        if self.card_operation is not None and self.card_operation[1].done():
+            self.finish_card(db)
         if monotonic() < self.read_pause_until:
             return
         with self.transaction(db) as cur:
@@ -189,6 +207,19 @@ class DeliveryLoop:
             ).fetchone()
         if paused:
             return
+        if self.card_pairs is not None:
+            try:
+                with self.transaction(db) as cur:
+                    card_pause = cur.execute(
+                        """SELECT 1 FROM messaging.contact_cards WHERE account_ref=%s
+                        AND error_code IN ('card_account_configuration','card_account_rate_limited','card_account_quota')
+                        AND next_action_at>now() LIMIT 1""",
+                        (self.account,),
+                    ).fetchone()
+                if card_pause:
+                    return
+            except psycopg.Error:
+                emit("card_pause_unavailable")
         self.category = (self.category + 1) % 3
         if self.category == 0:
             if self.history_turn(self, db):
@@ -214,6 +245,7 @@ class DeliveryLoop:
                     (self.account,),
                 ).fetchone()
             if job is None:
+                self.card_turn(db)
                 return
             api_started = monotonic()
             result = self.adapter.status(job)
@@ -223,6 +255,7 @@ class DeliveryLoop:
             with self.transaction(db) as cur:
                 job = claim(cur, self.account)
             if job is None:
+                self.card_turn(db)
                 return
             emit(
                 "claim",
@@ -248,6 +281,72 @@ class DeliveryLoop:
         self.pending_result = (job, result)
         self.save_result(db)
 
+    def card_turn(self, db):
+        if self.card_pairs is None or self.card_operation is not None:
+            return
+        from .cards import enqueue, claim_card
+
+        try:
+            with self.transaction(db) as cur:
+                # Normal sends/status work, including per-route blocked work,
+                # takes priority. Cards reserve the same API/send pacing slot.
+                if cur.execute(
+                    """SELECT 1 FROM messaging.messages m WHERE account_ref=%s AND direction='outbound'
+                    AND next_action_at<=now() AND (
+                      (provider_message_id IS NOT NULL AND state IN ('uncertain','provider_queued'))
+                      OR (state='pending' AND NOT EXISTS (
+                        SELECT 1 FROM messaging.messages p WHERE p.user_id=m.user_id AND p.account_ref=m.account_ref
+                        AND p.conversation_id=m.conversation_id AND p.queue_sequence<m.queue_sequence
+                        AND p.direction='outbound' AND p.state NOT IN ('sent','failed')))) LIMIT 1""",
+                    (self.account,),
+                ).fetchone():
+                    return
+                if cur.execute(
+                    """SELECT 1 FROM messaging.messages WHERE account_ref=%s AND direction='outbound'
+                    AND error_code IN ('quota','account_configuration','rate_limited') AND next_action_at>now() LIMIT 1""",
+                    (self.account,),
+                ).fetchone():
+                    return
+                if monotonic() - self.last_send < 1.1:
+                    return
+                if monotonic() >= self.next_card_scan:
+                    enqueue(cur, self.account, self.card_pairs)
+                    self.next_card_scan = monotonic() + 60
+                job = claim_card(cur, self.account, self.card_pairs)
+            if job is None:
+                return
+            if self.card_executor is None:
+                self.card_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="messaging-card")
+            operation = self.adapter.card_status if job["provider_message_id"] else self.adapter.send_card
+            future = self.card_executor.submit(operation, job)
+            self.card_operation = (job, future)
+            self.last_api = self.last_send = monotonic()
+            emit("card_claim", card_id=job["id"], attempt_id=job["attempt_id"])
+        except Exception:
+            emit("card_work_unavailable")
+
+    def finish_card(self, db):
+        from .cards import record_card_result
+
+        job, future = self.card_operation
+        try:
+            result = future.result()
+        except Exception:
+            result = SendResult(
+                "uncertain", job["provider_message_id"], "card_operation_unknown", response_body=job["response_body"]
+            )
+        # No-ID unknown may only retry the original persisted payload/key.
+        if result.state == "uncertain" and result.provider_id is None:
+            result = SendResult("pending", error_code=result.error_code)
+        try:
+            with self.transaction(db) as cur:
+                applied = record_card_result(cur, job, result)
+            emit("card_result", card_id=job["id"], state=result.state, error_code=result.error_code, applied=applied)
+            self.card_operation = None
+        except psycopg.Error:
+            # Retain this completed future; don't turn a known outcome into POST.
+            emit("card_result_commit_retry", card_id=job["id"])
+
     def save_result(self, db):
         # Keep known outcomes across database reconnections; never re-POST them.
         job, result = self.pending_result
@@ -264,6 +363,8 @@ class DeliveryLoop:
                     applied=applied,
                 )
                 self.pending_result = None
+                if result.state == "sent":
+                    self.next_card_scan = 0.0
                 return
             except psycopg.Error:
                 emit("result_commit_retry", message_id=job["id"], attempt_id=job["attempt_id"])
