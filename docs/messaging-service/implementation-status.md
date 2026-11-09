@@ -109,8 +109,9 @@ Comms preflight and private Pilot A checks are recorded in
 [release-candidate.md](release-candidate.md), together with the exact approved
 migration/config/one-deploy/final-ping stop gates and hosted A2/B1/burst/wake pass.
 Production still runs the old User release; Messaging is unapplied and undeployed.
-Pilot A is approved/joined and mapped privately; Pilot B's intended phone mismatch
-is a hold pending founder confirmation and a confirmed conversation setup text.
+Pilot A is approved/joined and mapped privately. Pilot B's approved joined User
+reference, one-to-one setup text and authenticated conversation are now verified;
+the two distinct pairs are combined privately (0600). No B reply was sent.
 
 The shared PostgreSQL harness now rehearses migration over existing fake User,
 Auth, invitation/address data and compares rows, grants/schema ACL and policies.
@@ -127,3 +128,12 @@ prior aa48cac review is not approval of the new candidate. TBD-18 remains In
 Progress through approval/merge; TBD-20 remains pending actual hosted verification.
 This round stops at the reviewable candidate, not cutover. Close TBD-17 only after
 both children and their linked evidence are complete.
+
+Pilot B readiness update: the `app-tbd TBD setup B1` record at
+`2026-11-09T03:19:05.543Z` matched the privately approved sender/shared line and
+independent conversation in the runtime-key read at `03:22:55.311711Z`. One-to-one
+handset confirmation is recorded; founder observed delivery and no automatic
+reply. A+B mapping has two entries with A unchanged, saved privately mode 0600.
+This documentation-only update changes no runtime/test/migration code from the
+146-passing aa55e6d candidate. Hold further tester texts until approved cutover;
+PR #5 remains open and no deployment, provider send or registration change occurs.

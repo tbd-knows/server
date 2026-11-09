@@ -39,29 +39,25 @@ Read-only production inspection (not a rollout):
 | Pilot A | Exactly one existing approved joined User matches the private verified phone; saved conversation/phone pair matches signed capture. No contact values published. |
 | Comms | Read-only preflight `2026-11-09T03:01:53.547049Z`: Pilot A exact history/route/conversation match; temporary webhook active, received+ping subscribed, secret matches private receiver file; final production webhook count zero. |
 | Capture transport | Local receiver responds, but temporary public tunnel is currently unreachable. Active registration is not proof of a working callback. No webhook/tunnel change made during preflight. |
-| Pilot B | Joined per founder; intended test phone mismatches the approved phone and is being resolved. No approved B conversation mapping yet. **Hold B setup text.** |
+| Pilot B | Existing approved joined User privately verified; one-to-one setup B1 at `2026-11-09T03:19:05.543Z` matched authenticated history/line/conversation. Separate from A; both pairs saved privately, mode 0600. No reply sent; setup evidence only. |
 
 ## Complete preparation before approving the final release
 
-1. Resolve Pilot B's phone with the founder privately. Use the approved joined
-   phone; do not silently update User Service contacts or allowlist another phone.
-   Confirm consent and a one-to-one iMessage thread. After that confirmation and
-   with authenticated history access available, give B the shared number from
-   **Lines → Live shared line assigned to TBD** and send exactly once:
-
-   ```text
-   app-tbd TBD setup B1
-   ```
-
-   This is **setup**, not hosted verification; no backend reply is expected.
-   Confirm no provider auto reply. Read authenticated history, match sender/line,
-   native ID and conversation, and confirm the handset's one-to-one thread.
-   Since capture transport is down, use authenticated history rather than claiming
-   signed B capture evidence; don't change production registrations in this round.
-   If route/history cannot be confirmed, stop and resolve setup before cutover.
-2. Combine confirmed A and B conversation/phone pairs privately. The A mapping is
-   `/private/tmp/tbd-comms-capture/pilot-conversations.private.json`; don't overwrite
-   it with a guessed B pair. Keep keys, numbers and native IDs outside Git.
+1. **Pilot B setup is complete; do not repeat the routing text.** B used the
+   approved phone of the existing joined User and sent `app-tbd TBD setup B1`
+   once in a handset-confirmed one-to-one iMessage thread. Authenticated history
+   and conversation reads matched sender/contact, shared line and independent B
+   conversation. Provider source time: `2026-11-09T03:19:05.543Z`; read verification:
+   `03:22:55.311711Z`. Founder observed delivered and no automatic reply. There is
+   no claimed signed B capture while the tunnel is down, and no reply was sent.
+   This is setup evidence, not hosted verification.
+2. Confirmed A and B pairs are combined at
+   `/private/tmp/tbd-comms-capture/pilot-conversations.private.json` (0600), with
+   private B source records/reference beside it. A's pair is preserved; B's phone
+   and conversation are distinct. Keep real identities/keys out of Git. Recheck
+   those private pairs at cutover and hold all further tester texts until the
+   final signed-ping/role/health gates below pass. Hosted texts remain A2 and B1;
+   the setup marker must not be counted or resent as a hosted check.
 3. Confirm the actual Free allowance/reset and remaining budget for all planned
    inbound/outbound messages plus setup/retry reserve. Confirm self-hosted mode and
    automated replies off. Pause tester traffic for the entire cutover.
