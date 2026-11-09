@@ -1,0 +1,118 @@
+{
+  "evidence": "actual signature-verified capture and API history; identifiers sanitized",
+  "classification_limit": "audience/attachments absent; one-off handset confirmation required; not a production default",
+  "webhook": {
+    "id": "event_pilot_a_received",
+    "data": {
+      "contact": {
+        "id": "contact_pilot_a",
+        "name": null,
+        "phone": "+12125550101"
+      },
+      "message": {
+        "id": "msg_pilot_a_inbound",
+        "body": "app-tbd TBD pilot 1",
+        "author": {
+          "contact_id": "contact_pilot_a",
+          "external_id": "+12125550101"
+        },
+        "status": "received",
+        "channel": "imessage",
+        "line_id": "line_shared_pilot",
+        "direction": "inbound",
+        "line_e164": "+12125550100",
+        "contact_id": "contact_pilot_a",
+        "created_at": "2026-11-08T22:38:34.756Z",
+        "conversation_id": "conversation_pilot_a"
+      },
+      "conversation_id": "conversation_pilot_a"
+    },
+    "event": "comms.message.received",
+    "object": "comms",
+    "sentAt": "2026-11-08T22:38:34.834Z",
+    "recordId": "msg_pilot_a_inbound"
+  },
+  "history": {
+    "id": "msg_pilot_a_inbound",
+    "author": {
+      "contact_id": "contact_pilot_a",
+      "external_id": "+12125550101"
+    },
+    "conversation_id": "conversation_pilot_a",
+    "contact_id": "contact_pilot_a",
+    "direction": "inbound",
+    "channel": "imessage",
+    "body": "app-tbd TBD pilot 1",
+    "status": "received",
+    "created_at": "2026-11-08T22:38:34.756Z",
+    "line_id": "line_shared_pilot",
+    "line_e164": "+12125550100"
+  },
+  "verification": {
+    "raw_signature_verified_by_receiver": true,
+    "signature_omitted": "Sanitization changes the signed body; no reusable signature or secret is published.",
+    "history_and_conversation_identity_checks": "passed",
+    "reply_http_status": 202,
+    "handset_confirmation": "Pilot A reports exactly one reply in the original iMessage thread",
+    "automatic_reply_observation": "Pilot A reported no automatic reply visible before the controlled send",
+    "routing_observation": "The full app-tbd-prefixed text reached TBD; keyword was not consumed in this observed message."
+  },
+  "conversation": {
+    "id": "conversation_pilot_a",
+    "contact_id": "contact_pilot_a",
+    "phone": "+12125550101",
+    "line_e164": "+12125550100",
+    "channel": "imessage"
+  },
+  "acceptance": {
+    "message": {
+      "id": "msg_pilot_a_reply",
+      "conversation_id": "conversation_pilot_a",
+      "contact_id": "contact_pilot_a",
+      "direction": "outbound",
+      "channel": "imessage",
+      "body": "Received your text.",
+      "status": "unknown",
+      "created_at": "2026-11-08T22:54:51.240Z",
+      "line_id": "line_shared_pilot",
+      "line_e164": "+12125550100"
+    },
+    "delivery_unknown": true
+  },
+  "outbound_history": [
+    {
+      "id": "msg_pilot_a_reply",
+      "conversation_id": "conversation_pilot_a",
+      "contact_id": "contact_pilot_a",
+      "direction": "outbound",
+      "channel": "imessage",
+      "body": "Received your text.",
+      "status": "unknown",
+      "created_at": "2026-11-08T22:54:51.240Z",
+      "line_id": "line_shared_pilot",
+      "line_e164": "+12125550100"
+    }
+  ],
+  "later_history_observation": {
+    "observed_at": "2026-11-08T23:05:38.437356+00:00",
+    "http_status": 200,
+    "exact_id_match": true,
+    "helper_label_before_fix": "unrecognized",
+    "raw_provider_status": "read"
+  },
+  "later_outbound_history": [
+    {
+      "id": "msg_pilot_a_reply",
+      "conversation_id": "conversation_pilot_a",
+      "contact_id": "contact_pilot_a",
+      "direction": "outbound",
+      "channel": "imessage",
+      "body": "Received your text.",
+      "status": "read",
+      "created_at": "2026-11-08T22:54:51.240Z",
+      "line_id": "line_shared_pilot",
+      "line_e164": "+12125550100",
+      "read_at": "2026-11-08T22:56:05.218Z"
+    }
+  ]
+}

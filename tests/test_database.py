@@ -29,7 +29,46 @@ def store():
         for role in ("anon", "authenticated"):
             if not db.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (role,)).fetchone():
                 db.execute(psycopg.sql.SQL("CREATE ROLE {}").format(psycopg.sql.Identifier(role)))
-        db.execute(next(Path("supabase/migrations").glob("*_user_service.sql")).read_text())
+        db.execute(Path("supabase/migrations/20261101103939_user_service.sql").read_text())
+        # Rehearse the additive release over existing User data, not empty tables.
+        prior_user, prior_auth, prior_invite, prior_address = (uuid4() for _ in range(4))
+        db.execute("INSERT INTO auth.users VALUES (%s)", (prior_auth,))
+        db.execute(
+            """INSERT INTO user_service.users (id,auth_user_id,name,type,phone,email)
+            VALUES (%s,%s,'Release Rehearsal','individual','+12125550881','release@example.test')""",
+            (prior_user, prior_auth),
+        )
+        db.execute(
+            """INSERT INTO user_service.invitations
+            (id,name,type,phone,email,auth_user_id,joined_user_id)
+            VALUES (%s,'Release Rehearsal','individual','+12125550881','release@example.test',%s,%s)""",
+            (prior_invite, prior_auth, prior_user),
+        )
+        db.execute(
+            """INSERT INTO user_service.addresses
+            (id,user_id,recipient,line1,city,region,postal_code,country_code,is_default)
+            VALUES (%s,%s,'Release Rehearsal','1 Example St','Example','NY','10001','US',true)""",
+            (prior_address, prior_user),
+        )
+        snapshot_queries = [
+            "SELECT * FROM user_service.users ORDER BY id",
+            "SELECT * FROM user_service.invitations ORDER BY id",
+            "SELECT * FROM user_service.addresses ORDER BY id",
+            "SELECT * FROM auth.users ORDER BY id",
+            "SELECT table_name,grantee,privilege_type FROM information_schema.role_table_grants WHERE table_schema='user_service' ORDER BY 1,2,3",
+            "SELECT nspname,nspacl::text FROM pg_namespace WHERE nspname='user_service'",
+            "SELECT tablename,policyname,roles,cmd,qual,with_check FROM pg_policies WHERE schemaname='user_service' ORDER BY 1,2",
+        ]
+        before = [db.execute(query).fetchall() for query in snapshot_queries]
+        for migration in sorted(Path("supabase/migrations").glob("*.sql")):
+            if not migration.name.endswith("_user_service.sql"):
+                db.execute(migration.read_text())
+        assert [db.execute(query).fetchall() for query in snapshot_queries] == before
+        # Remove only these known fake rehearsal records, retaining the new schema.
+        db.execute("DELETE FROM user_service.addresses WHERE id=%s", (prior_address,))
+        db.execute("DELETE FROM user_service.invitations WHERE id=%s", (prior_invite,))
+        db.execute("DELETE FROM user_service.users WHERE id=%s", (prior_user,))
+        db.execute("DELETE FROM auth.users WHERE id=%s", (prior_auth,))
     return Store(make_conninfo(url, user="tbd_user_backend"))
 
 
@@ -607,3 +646,548 @@ def test_http_join_during_delivery_without_founder_resend(store, lost_response):
     assert saved["auth_user_id"] == identity and str(saved["joined_user_id"]) == joined["id"]
     with store.transaction() as cur:
         assert cur.execute("SELECT count(*) AS n FROM users WHERE auth_user_id=%s", (identity,)).fetchone()["n"] == 1
+
+
+def messaging_invitation(store, phone):
+    identity, invitation = uuid4(), uuid4()
+    email = f"{invitation}@example.test"
+    with psycopg.connect(os.environ["TEST_DATABASE_URL"]) as db:
+        db.execute("INSERT INTO auth.users VALUES (%s)", (identity,))
+    with store.transaction() as cur:
+        cur.execute(
+            "INSERT INTO invitations (id,name,phone,email,type,auth_user_id) VALUES (%s,'Messaging Example',%s,%s,'individual',%s)",
+            (invitation, phone, email, identity),
+        )
+    return identity, email
+
+
+def test_messaging_join_creates_zero_outbound(store):
+    identity, email = messaging_invitation(store, "+12125550991")
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        users = list(executor.map(lambda _: store.join(identity, email), range(2)))
+    assert users[0]["id"] == users[1]["id"]
+    with store.transaction() as cur:
+        assert (
+            cur.execute("SELECT count(*) AS n FROM messaging.messages WHERE user_id=%s", (users[0]["id"],)).fetchone()[
+                "n"
+            ]
+            == 0
+        )
+
+
+def test_messaging_private_schema_and_immutable_columns(store):
+    for role in ("anon", "authenticated"):
+        with psycopg.connect(os.environ["TEST_DATABASE_URL"]) as db:
+            db.execute(psycopg.sql.SQL("SET ROLE {}").format(psycopg.sql.Identifier(role)))
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                db.execute("SELECT * FROM messaging.messages")
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        with store.transaction() as cur:
+            cur.execute("UPDATE messaging.messages SET text='rewritten'")
+
+
+def test_messaging_inbound_replay_and_atomic_reply(store):
+    from dataclasses import replace
+    from datetime import datetime, timedelta, timezone
+    from tbd_server.messaging.core import ReceivedMessage, receive_message
+
+    identity, email = messaging_invitation(store, "+12125550992")
+    user = store.join(identity, email)
+    now = datetime.now(timezone.utc)
+    event = ReceivedMessage(
+        "fake-inbound-" + str(uuid4()), "+12125550000", user["phone"], " \n🙂\n ", False, now, "conversation_fake"
+    )
+
+    def receive():
+        with store.transaction() as cur:
+            return receive_message(cur, event, now - timedelta(days=1))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        rows = list(executor.map(lambda _: receive(), range(2)))
+    assert rows[0]["id"] == rows[1]["id"]
+    assert rows[0]["text"] == event.text
+    with store.transaction() as cur:
+        assert (
+            cur.execute(
+                "SELECT count(*) AS n FROM messaging.messages WHERE reply_to_message_id=%s", (rows[0]["id"],)
+            ).fetchone()["n"]
+            == 1
+        )
+    with pytest.raises(Problem) as error:
+        with store.transaction() as cur:
+            receive_message(cur, replace(event, text="changed"), now)
+    assert error.value.status == 409
+
+
+def test_messaging_delivery_route_order_stale_results_and_known_recovery(store):
+    from tbd_server.messaging.adapter import SendResult
+    from tbd_server.messaging.core import queue_message
+    from tbd_server.messaging.runtime import claim, record_send_result
+
+    account = "+12125550007"
+    identity, email = messaging_invitation(store, "+12125550993")
+    user = store.join(identity, email)
+    identity2, email2 = messaging_invitation(store, "+12125550994")
+    other = store.join(identity2, email2)
+    with store.transaction() as cur:
+        Store.user(cur, user["id"])
+        first = queue_message(
+            cur, user, (account, user["phone"], "conversation_a"), "first", "first:" + str(user["id"])
+        )
+        second = queue_message(
+            cur, user, (account, user["phone"], "conversation_a"), "second", "fake-second:" + str(user["id"])
+        )
+        Store.user(cur, other["id"])
+        other_reply = queue_message(
+            cur, other, (account, other["phone"], "conversation_b"), "first", "first:" + str(other["id"])
+        )
+    with store.transaction() as cur:
+        claimed = claim(cur, account)
+    assert claimed["id"] == first["id"]
+    with store.transaction() as cur:
+        # Another User progresses while the first route is awaiting an outcome.
+        assert claim(cur, account)["id"] == other_reply["id"]
+        assert claim(cur, account) is None
+        assert not record_send_result(cur, first["id"], uuid4(), SendResult("failed"))
+        assert record_send_result(cur, first["id"], claimed["attempt_id"], SendResult("provider_queued", "fake-job-1"))
+        assert not record_send_result(cur, first["id"], claimed["attempt_id"], SendResult("sent", "wrong-job"))
+        assert record_send_result(
+            cur, first["id"], claimed["attempt_id"], SendResult("uncertain", "fake-job-1", "unknown_outcome")
+        )
+        assert claim(cur, account) is None
+        assert record_send_result(
+            cur, first["id"], claimed["attempt_id"], SendResult("sent", "fake-job-1", observed_status="sent")
+        )
+        assert not record_send_result(
+            cur, first["id"], claimed["attempt_id"], SendResult("provider_queued", "fake-job-1")
+        )
+        assert claim(cur, account)["id"] == second["id"]
+
+
+def test_messaging_reply_fk_blocks_cross_user_and_inbound_state_constraints(store):
+    account = "+12125550008"
+    identity, email = messaging_invitation(store, "+12125550995")
+    user = store.join(identity, email)
+    with pytest.raises(psycopg.errors.CheckViolation):
+        with store.transaction() as cur:
+            cur.execute(
+                """INSERT INTO messaging.messages
+                (user_id,channel,direction,dedupe_key,account_ref,peer_ref,conversation_id,text,state)
+                VALUES (%s,'imessage','inbound','fake-invalid',%s,%s,'conversation_fake','text','received')""",
+                (user["id"], account, user["phone"]),
+            )
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+        with store.transaction() as cur:
+            cur.execute(
+                """INSERT INTO messaging.messages
+                (user_id,channel,direction,dedupe_key,account_ref,peer_ref,conversation_id,text,state,reply_to_message_id)
+                VALUES (%s,'imessage','outbound','fake-orphan',%s,%s,'conversation_fake','reply','pending',%s)""",
+                (user["id"], account, user["phone"], uuid4()),
+            )
+
+
+def test_comms_retry_window_and_stable_uuid(store):
+    from tbd_server.messaging.core import queue_message
+    from tbd_server.messaging.runtime import claim, record_send_result
+    from tbd_server.messaging.adapter import SendResult
+
+    identity, email = messaging_invitation(store, "+12125550996")
+    user = store.join(identity, email)
+    account = "+12125550016"
+    with store.transaction() as cur:
+        Store.user(cur, user["id"])
+        original = queue_message(
+            cur, user, (account, user["phone"], "conversation_window"), "reply", "window:" + str(user["id"])
+        )
+        first = claim(cur, account)
+        record_send_result(cur, first["id"], first["attempt_id"], SendResult("pending", error_code="transport_unknown"))
+        cur.execute("UPDATE messaging.messages SET next_action_at=now() WHERE id=%s", (first["id"],))
+        second = claim(cur, account)
+        assert second["id"] == original["id"]
+        assert second["attempt_id"] != first["attempt_id"]
+        assert second["first_attempt_at"] == first["first_attempt_at"]
+        record_send_result(
+            cur, second["id"], second["attempt_id"], SendResult("pending", error_code="transport_unknown")
+        )
+        cur.execute(
+            "UPDATE messaging.messages SET first_attempt_at=now()-interval '25 hours',next_action_at=now() WHERE id=%s",
+            (original["id"],),
+        )
+        assert claim(cur, account) is None
+        held = cur.execute("SELECT * FROM messaging.messages WHERE id=%s", (original["id"],)).fetchone()
+        assert held["state"] == "uncertain" and held["error_code"] == "idempotency_expired"
+
+
+def test_comms_webhook_to_reply_with_actual_database_and_fake_provider(store):
+    from datetime import datetime, timezone
+    import hashlib
+    import hmac
+    import json
+    from unittest.mock import Mock
+    import httpx
+    from fastapi.testclient import TestClient
+    from tbd_server.user.api import create_app
+    from tbd_server.messaging.service import Messaging
+    from tbd_server.messaging.adapter import Comms
+    from tbd_server.messaging.runtime import claim, record_send_result
+    from test_messaging_adapter import inbound, outbound
+
+    identity, email = messaging_invitation(store, "+12125550997")
+    user = store.join(identity, email)
+    messaging = Messaging(
+        store,
+        "fake",
+        "fake-secret",
+        "+12125550100",
+        "2026-11-08T00:00:00Z",
+        pilot_conversations={"conversation_fake": user["phone"]},
+    )
+    messaging.loop.start = Mock()
+    messaging.loop.stop = Mock()
+    record = inbound(
+        id="msg_http_database", created_at=datetime.now(timezone.utc).isoformat(), author={"external_id": user["phone"]}
+    )
+    raw = json.dumps({"event": "comms.message.received", "data": {"message": record}}).encode()
+    signature = "sha256=" + hmac.new(b"fake-secret", raw, hashlib.sha256).hexdigest()
+    with TestClient(create_app(store, Mock(), "provision", "internal", [], messaging=messaging)) as client:
+        for _ in range(2):
+            assert (
+                client.post("/webhooks/comms", content=raw, headers={"X-Osis-Signature": signature}).status_code == 200
+            )
+    with store.transaction() as cur:
+        rows = cur.execute(
+            "SELECT * FROM messaging.messages WHERE user_id=%s ORDER BY queue_sequence", (user["id"],)
+        ).fetchall()
+        assert len(rows) == 2 and rows[0]["text"] == record["body"]
+        assert rows[1]["reply_to_message_id"] == rows[0]["id"]
+        j = claim(cur, messaging.account)
+
+    def handler(request):
+        assert request.headers["idempotency-key"] == str(j["id"])
+        return httpx.Response(202, json={"message": outbound(j, status="submitted")})
+
+    adapter = Comms("fake", transport=httpx.MockTransport(handler))
+    result = adapter.send(j)
+    with store.transaction() as cur:
+        assert record_send_result(cur, j["id"], j["attempt_id"], result)
+    adapter.close()
+    messaging.adapter.close()
+
+
+def test_messaging_session_ownership_is_exclusive(store):
+    from tbd_server.messaging.runtime import LOCK_ID
+
+    with (
+        psycopg.connect(store.database_url, autocommit=True) as first,
+        psycopg.connect(store.database_url, autocommit=True) as second,
+    ):
+        assert first.execute("SELECT pg_try_advisory_lock(%s)", (LOCK_ID,)).fetchone()[0]
+        assert not second.execute("SELECT pg_try_advisory_lock(%s)", (LOCK_ID,)).fetchone()[0]
+        first.execute("SELECT pg_advisory_unlock(%s)", (LOCK_ID,))
+        assert second.execute("SELECT pg_try_advisory_lock(%s)", (LOCK_ID,)).fetchone()[0]
+
+
+def test_comms_unknown_seed_boundary_and_history_edit_preservation(store):
+    from dataclasses import replace
+    from datetime import datetime, timedelta, timezone
+    from tbd_server.messaging.core import ReceivedMessage, receive_message
+
+    identity, email = messaging_invitation(store, "+12125550998")
+    user = store.join(identity, email)
+    seed = store.seed(Seed(seed_key="comms-ineligible", name="Fake Seed", phone="+12125550999"))
+    now = datetime.now(timezone.utc)
+    event = ReceivedMessage(
+        "msg_boundaries", "+12125550100", user["phone"], "original", False, now, "conversation_boundaries"
+    )
+    with store.transaction() as cur:
+        assert (
+            receive_message(cur, replace(event, native_id="unknown", peer="+12125550989"), now - timedelta(days=1))
+            is None
+        )
+        assert (
+            receive_message(cur, replace(event, native_id="seed", peer=seed["phone"]), now - timedelta(days=1)) is None
+        )
+        assert (
+            receive_message(
+                cur,
+                replace(event, native_id="old", source_at=user["created_at"] - timedelta(seconds=1)),
+                now - timedelta(days=1),
+            )
+            is None
+        )
+        assert receive_message(cur, replace(event, native_id="inactive"), now + timedelta(seconds=1)) is None
+        original = receive_message(cur, event, now - timedelta(days=1))
+        replay = receive_message(cur, replace(event, text="edited", history=True), now - timedelta(days=1))
+        assert replay["id"] == original["id"] and replay["text"] == "original"
+        distinct = receive_message(cur, replace(event, native_id="msg_distinct_same_text"), now - timedelta(days=1))
+        assert distinct["id"] != original["id"]
+        assert (
+            cur.execute("SELECT count(*) AS n FROM messaging.messages WHERE user_id=%s", (user["id"],)).fetchone()["n"]
+            == 4
+        )
+    with pytest.raises(RuntimeError):
+        with store.transaction() as cur:
+            receive_message(cur, replace(event, native_id="msg_rollback"), now - timedelta(days=1))
+            raise RuntimeError("injected before commit")
+    with store.transaction() as cur:
+        assert (
+            cur.execute("SELECT 1 FROM messaging.messages WHERE dedupe_key='inbound:msg_rollback'").fetchone() is None
+        )
+
+
+def test_comms_exact_id_unknown_to_read_releases_next_conversation_job(store):
+    """Actual sanitized provider shapes, real SQL states, no live HTTP/send."""
+    from copy import deepcopy
+    import json
+    import httpx
+    from tbd_server.messaging.adapter import Comms
+    from tbd_server.messaging.core import queue_message
+    from tbd_server.messaging.runtime import claim, record_send_result
+
+    fixture = json.loads(Path("docs/messaging-service/fixtures/comms-free-pilot-a.json").read_text())
+    account = "+12125550025"
+    identity, email = messaging_invitation(store, "+12125550988")
+    user = store.join(identity, email)
+    conversation = "conversation_read_recovery"
+    with store.transaction() as cur:
+        Store.user(cur, user["id"])
+        first = queue_message(
+            cur, user, (account, user["phone"], conversation), "Received your text.", "read-first:" + str(user["id"])
+        )
+        second = queue_message(
+            cur, user, (account, user["phone"], conversation), "Next reply", "read-second:" + str(user["id"])
+        )
+        attempted = claim(cur, account)
+    assert attempted["id"] == first["id"]
+    accepted = deepcopy(fixture["acceptance"]["message"])
+    read = deepcopy(fixture["later_outbound_history"][0])
+    for record in (accepted, read):
+        record.update(line_e164=account, conversation_id=conversation)
+    acceptance = Comms.classify(accepted, attempted)
+    assert acceptance.state == "uncertain" and acceptance.observed_status == "unknown"
+    with store.transaction() as cur:
+        assert record_send_result(cur, first["id"], attempted["attempt_id"], acceptance)
+        assert claim(cur, account) is None
+        known = cur.execute("SELECT * FROM messaging.messages WHERE id=%s", (first["id"],)).fetchone()
+    seen = []
+
+    def handler(request):
+        assert request.method == "GET"
+        assert request.url.params["conversation_id"] == conversation
+        assert request.url.params["direction"] == "outbound"
+        seen.append(request.method)
+        # A read result for another ID must not release this route.
+        records = [{**read, "id": "wrong_id"}]
+        if len(seen) > 1:
+            records.append(read)
+        return httpx.Response(200, json={"messages": records})
+
+    adapter = Comms("fake", transport=httpx.MockTransport(handler))
+    try:
+        missing = adapter.status(known)
+        assert missing.state == "uncertain"
+        with store.transaction() as cur:
+            assert record_send_result(cur, first["id"], attempted["attempt_id"], missing)
+            assert claim(cur, account) is None
+        terminal = adapter.status(known)
+    finally:
+        adapter.close()
+    assert seen == ["GET", "GET"]
+    assert terminal.state == "sent" and terminal.observed_status == "read"
+    with store.transaction() as cur:
+        assert record_send_result(cur, first["id"], attempted["attempt_id"], terminal)
+        stored = cur.execute("SELECT * FROM messaging.messages WHERE id=%s", (first["id"],)).fetchone()
+        assert stored["state"] == "sent" and stored["observed_status"] == "read"
+        assert stored["accepted_at"] is not None and stored["sent_observed_at"] is not None
+        assert not record_send_result(cur, first["id"], attempted["attempt_id"], acceptance)
+        assert claim(cur, account)["id"] == second["id"]
+
+
+def test_allowlisted_pilot_fixture_webhook_and_history_share_admission(store):
+    """Real sanitized shapes, signature boundary and actual atomic SQL; no live send."""
+    from copy import deepcopy
+    from datetime import datetime, timedelta
+    import hashlib
+    import hmac
+    import json
+    from unittest.mock import Mock
+    import httpx
+    from fastapi.testclient import TestClient
+    from tbd_server.messaging.adapter import Comms
+    from tbd_server.messaging.service import Messaging
+    from tbd_server.user.api import create_app
+
+    fixture = json.loads(Path("docs/messaging-service/fixtures/comms-free-pilot-a.json").read_text())
+    event, history = deepcopy(fixture["webhook"]), deepcopy(fixture["history"])
+    identity, email = messaging_invitation(store, "+12125550986")
+    user = store.join(identity, email)
+    other_identity, other_email = messaging_invitation(store, "+12125550985")
+    other = store.join(other_identity, other_email)
+    # Rebind the fixture's fake phone to an isolated fake User, preserving real shape/time/text.
+    event["data"]["message"]["author"]["external_id"] = user["phone"]
+    event["data"]["contact"]["phone"] = user["phone"]
+    history["author"]["external_id"] = user["phone"]
+    source = datetime.fromisoformat(history["created_at"].replace("Z", "+00:00"))
+    with psycopg.connect(os.environ["TEST_DATABASE_URL"]) as db:
+        db.execute(
+            "UPDATE user_service.users SET created_at=%s WHERE id IN (%s,%s)",
+            (source - timedelta(days=1), user["id"], other["id"]),
+        )
+    account, conversation = history["line_e164"], history["conversation_id"]
+    messaging = Messaging(
+        store,
+        "fake-key",
+        "fake-secret",
+        account,
+        (source - timedelta(hours=1)).isoformat(),
+        pilot_conversations={conversation: user["phone"]},
+    )
+    messaging.loop.start = Mock()
+    messaging.loop.stop = Mock()
+    records = [history]
+
+    def provider(request):
+        assert request.method == "GET" and request.url.params["direction"] == "inbound"
+        assert request.headers["authorization"] == "Bearer fake-key"
+        return httpx.Response(200, json={"messages": records})
+
+    messaging.adapter.close()
+    messaging.adapter = Comms("fake-key", transport=httpx.MockTransport(provider))
+    with TestClient(create_app(store, Mock(), "provision", "internal", [], messaging=messaging)) as client:
+
+        def post(value):
+            raw = json.dumps(value).encode()
+            signature = "sha256=" + hmac.new(b"fake-secret", raw, hashlib.sha256).hexdigest()
+            return client.post("/webhooks/comms", content=raw, headers={"X-Osis-Signature": signature})
+
+        assert post(event).status_code == 200
+        with store.transaction() as cur:
+            rows = cur.execute(
+                "SELECT * FROM messaging.messages WHERE user_id=%s ORDER BY queue_sequence", (user["id"],)
+            ).fetchall()
+        assert len(rows) == 2
+        assert rows[0]["text"] == history["body"] and rows[0]["state"] == "received"
+        assert rows[1]["text"] == "Received your text." and rows[1]["state"] == "pending"
+        assert rows[1]["reply_to_message_id"] == rows[0]["id"]
+        assert rows[0]["conversation_id"] == rows[1]["conversation_id"] == conversation
+        assert post(event).status_code == 200
+        assert messaging.history_turn(messaging.loop)
+        changes = [
+            {"author": {"external_id": other["phone"]}},
+            {"conversation_id": "conversation_not_approved"},
+            {"line_e164": "+12125550984"},
+            {"audience": "shared"},
+            {"attachments": [{"mediaType": "image"}]},
+            {"unsent_at": history["created_at"]},
+            {"direction": "outbound"},
+            {"channel": "sms"},
+            {"event": "comms.message.reaction.added"},
+            {"event": "comms.message.edited"},
+        ]
+        for n, change in enumerate(changes):
+            excluded = deepcopy(event)
+            excluded["data"]["message"].update(id=f"pilot_excluded_{n}", **change)
+            assert post(excluded).status_code == 200
+            records.append(excluded["data"]["message"])
+        messaging.next_sweep = 0
+        assert messaging.history_turn(messaging.loop)
+        with store.transaction() as cur:
+            rows_after = cur.execute(
+                "SELECT * FROM messaging.messages WHERE user_id IN (%s,%s) ORDER BY queue_sequence",
+                (user["id"], other["id"]),
+            ).fetchall()
+        assert [r["id"] for r in rows_after] == [r["id"] for r in rows]
+    messaging.adapter.close()
+
+
+def test_release_rehearsal_uvicorn_starts_with_real_role_and_healthy_owned_loop(store):
+    """Real HTTP/process/lifespan and local DB; every provider call is intercepted."""
+    import json
+    import socket
+    import subprocess
+    import sys
+    import time
+    import httpx
+
+    script = """
+import httpx
+import uvicorn
+from tbd_server.messaging.adapter import Comms
+
+def fake_provider(self, method, path, **kwargs):
+    assert method == "GET" and path == "messages", "No live or outbound provider calls in rehearsal"
+    request = httpx.Request(method, "https://provider.example.test/messages")
+    return httpx.Response(200, json={"messages": []}, request=request)
+Comms.request = fake_provider
+uvicorn.run("tbd_server.main:app", host="127.0.0.1", port=PORT, workers=1, access_log=False)
+"""
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    env = {
+        "PATH": os.environ["PATH"],
+        "PYTHONPATH": "src",
+        "DATABASE_URL": store.database_url,
+        "SUPABASE_URL": "https://auth.example.test",
+        "SUPABASE_SECRET_KEY": "fake-auth-key",
+        "JOIN_SITE_URL": "https://join.example.test",
+        "PROVISIONING_TOKEN": "fake-provision",
+        "INTERNAL_SERVICE_TOKEN": "fake-internal",
+        "ALLOWED_WEB_ORIGINS": "https://join.example.test",
+        "COMMS_API_KEY": "fake-runtime-key",
+        "COMMS_WEBHOOK_SECRET": "fake-webhook-secret",
+        "COMMS_LINE_E164": "+12125550880",
+        "MESSAGING_ACTIVATED_AT": "2026-11-08T00:00:00Z",
+        "COMMS_PILOT_CONVERSATIONS": "{}",
+    }
+    process = subprocess.Popen(
+        [sys.executable, "-c", script.replace("PORT", str(port))],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while True:
+            if process.poll() is not None:
+                pytest.fail("Uvicorn exited before readiness")
+            try:
+                response = httpx.get(f"http://127.0.0.1:{port}/healthz", timeout=0.5)
+                if response.status_code == 200:
+                    break
+            except httpx.HTTPError:
+                pass
+            if time.monotonic() > deadline:
+                pytest.fail("Uvicorn readiness deadline")
+            time.sleep(0.05)
+        assert response.json() == {"status": "ok"}
+        # Require actual worker ownership and a successful fake history call, not
+        # merely a thread alive while waiting for ownership.
+        while True:
+            with store.transaction() as cur:
+                owned = cur.execute(
+                    "SELECT count(*) AS n FROM pg_locks WHERE locktype='advisory' AND objid=843219017 AND granted"
+                ).fetchone()["n"]
+            if owned:
+                break
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        time.sleep(0.7)
+        assert httpx.get(f"http://127.0.0.1:{port}/healthz", timeout=1).status_code == 200
+    finally:
+        process.terminate()
+        stdout, stderr = process.communicate(timeout=10)
+    # Uvicorn re-raises SIGTERM after its graceful lifespan shutdown.
+    assert process.returncode in (0, -15)
+    assert "Application shutdown complete" in stderr
+    with store.transaction() as cur:
+        assert (
+            cur.execute(
+                "SELECT count(*) AS n FROM pg_locks WHERE locktype='advisory' AND objid=843219017 AND granted"
+            ).fetchone()["n"]
+            == 0
+        )
+    connection = json.loads(stdout.splitlines()[0])["database_connection_verified"]
+    assert connection["role"] == "tbd_user_backend"
+    assert '"history_sweep_complete"' in stderr and '"loop_failed"' not in stderr

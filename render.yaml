@@ -27,3 +27,13 @@ services:
         sync: false
       - key: ALLOWED_WEB_ORIGINS
         sync: false
+      - key: COMMS_API_KEY
+        sync: false
+      - key: COMMS_WEBHOOK_SECRET
+        sync: false
+      - key: COMMS_LINE_E164
+        sync: false
+      - key: MESSAGING_ACTIVATED_AT
+        sync: false
+      - key: COMMS_PILOT_CONVERSATIONS
+        sync: false

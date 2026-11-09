@@ -31,7 +31,7 @@ from .models import (
 from .store import Problem
 
 
-def create_app(store, auth, provisioning_token: str, internal_token: str, origins: list[str]):
+def create_app(store, auth, provisioning_token: str, internal_token: str, origins: list[str], *, messaging=None):
     if not provisioning_token or not internal_token or provisioning_token == internal_token:
         raise ValueError("Distinct nonempty provisioning/internal credentials are required")
     for origin in origins:
@@ -47,6 +47,7 @@ def create_app(store, auth, provisioning_token: str, internal_token: str, origin
         ):
             raise ValueError("CORS origins must be exact HTTP(S) origins")
     app = FastAPI(
+        lifespan=messaging.lifespan if messaging is not None else None,
         title="TBD User service",
         version="0.1.0",
         responses={
@@ -106,7 +107,12 @@ def create_app(store, auth, provisioning_token: str, internal_token: str, origin
 
     @app.get("/healthz", response_model=HealthResponse)
     def health():
+        if messaging is not None and not messaging.loop.healthy():
+            raise HTTPException(503, "Messaging loop unavailable")
         return {"status": "ok"}
+
+    if messaging is not None:
+        app.add_api_route("/webhooks/comms", messaging.webhook, methods=["POST"])
 
     @app.post(
         "/internal/invitations",
