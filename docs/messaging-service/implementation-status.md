@@ -47,7 +47,7 @@ uv run --locked ruff format --check src tests scripts
 git diff --check
 ```
 
-**144 passed, zero skipped**, disposable local PostgreSQL over TCP and the actual
+**146 passed, zero skipped**, disposable local PostgreSQL over TCP and the actual
 restricted backend role, plus controlled HTTP. One existing Starlette/AnyIO
 warning. Automated tests never contact the live provider or hosted database.
 
@@ -101,3 +101,29 @@ passes **144 tests, zero skipped**; Ruff/format/whitespace pass. One existing
 upstream warning remains. Both fixes are ready for focused re-review in PR #5;
 TBD-18 stays In Progress. No live provider call, production migration/deployment
 or merge occurred for these corrections.
+
+## Final release-candidate preparation
+
+The initial PR/local head matched reviewed aa48cac. Read-only Render/Supabase/
+Comms preflight and private Pilot A checks are recorded in
+[release-candidate.md](release-candidate.md), together with the exact approved
+migration/config/one-deploy/final-ping stop gates and hosted A2/B1/burst/wake pass.
+Production still runs the old User release; Messaging is unapplied and undeployed.
+Pilot A is approved/joined and mapped privately; Pilot B's intended phone mismatch
+is a hold pending founder confirmation and a confirmed conversation setup text.
+
+The shared PostgreSQL harness now rehearses migration over existing fake User,
+Auth, invitation/address data and compares rows, grants/schema ACL and policies.
+A real local Uvicorn process proves the restricted role, exclusive delivery-loop
+ownership, fake history, healthy HTTP and graceful shutdown/lock release. Added
+one small rollout log, `webhook_ping_verified`, only after successful HMAC ping
+verification, with a focused no-message-work/bad-signature regression. No new
+service/table/adapter/loop or child PR. Final full suite: **146 passed, zero
+skipped**; lint/format/whitespace pass, one existing upstream warning. Targeted
+rehearsal: **1 passed, zero skipped**. No production mutation or live send.
+
+PR #5 stays open for one founder review of this final diff/private configuration;
+prior aa48cac review is not approval of the new candidate. TBD-18 remains In
+Progress through approval/merge; TBD-20 remains pending actual hosted verification.
+This round stops at the reviewable candidate, not cutover. Close TBD-17 only after
+both children and their linked evidence are complete.

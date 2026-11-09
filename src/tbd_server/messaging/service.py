@@ -93,6 +93,8 @@ class Messaging:
                         raise Problem(413, "Webhook body too large")
                 event = signed_event(bytes(chunks), request.headers.get("x-osis-signature", ""), self.secret)
                 if event["event"] != "comms.message.received":
+                    if event["event"] == "comms.ping":
+                        emit("webhook_ping_verified", request_id=request_id)
                     return {"received": True}
                 if not isinstance(event.get("data"), dict):
                     raise Problem(422, "Invalid event data")

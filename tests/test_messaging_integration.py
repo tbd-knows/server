@@ -81,3 +81,24 @@ def test_waiting_loop_healthy_stopped_or_stalled_unhealthy():
     assert not loop.healthy()
     loop.thread = None
     assert not loop.healthy()
+
+
+def test_signed_ping_produces_safe_cutover_evidence_without_message_work(caplog):
+    messaging = service()
+    messaging.receive = Mock()
+    app = FastAPI()
+
+    @app.exception_handler(Problem)
+    async def problem(request, exc):
+        return JSONResponse({"detail": exc.detail}, status_code=exc.status)
+
+    app.add_api_route("/webhooks/comms", messaging.webhook, methods=["POST"])
+    raw = b'{"event":"comms.ping"}'
+    signature = "sha256=" + hmac.new(b"fake-secret", raw, hashlib.sha256).hexdigest()
+    with TestClient(app) as client, caplog.at_level("INFO", logger="tbd.messaging"):
+        assert client.post("/webhooks/comms", content=raw, headers={"X-Osis-Signature": signature}).status_code == 200
+        assert client.post("/webhooks/comms", content=raw, headers={"X-Osis-Signature": "bad"}).status_code == 401
+    verified = [json.loads(record.message) for record in caplog.records if "webhook_ping_verified" in record.message]
+    assert len(verified) == 1 and set(verified[0]) == {"event", "request_id"}
+    messaging.receive.assert_not_called()
+    messaging.adapter.close()

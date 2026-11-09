@@ -29,8 +29,46 @@ def store():
         for role in ("anon", "authenticated"):
             if not db.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (role,)).fetchone():
                 db.execute(psycopg.sql.SQL("CREATE ROLE {}").format(psycopg.sql.Identifier(role)))
+        db.execute(Path("supabase/migrations/20261101103939_user_service.sql").read_text())
+        # Rehearse the additive release over existing User data, not empty tables.
+        prior_user, prior_auth, prior_invite, prior_address = (uuid4() for _ in range(4))
+        db.execute("INSERT INTO auth.users VALUES (%s)", (prior_auth,))
+        db.execute(
+            """INSERT INTO user_service.users (id,auth_user_id,name,type,phone,email)
+            VALUES (%s,%s,'Release Rehearsal','individual','+12125550881','release@example.test')""",
+            (prior_user, prior_auth),
+        )
+        db.execute(
+            """INSERT INTO user_service.invitations
+            (id,name,type,phone,email,auth_user_id,joined_user_id)
+            VALUES (%s,'Release Rehearsal','individual','+12125550881','release@example.test',%s,%s)""",
+            (prior_invite, prior_auth, prior_user),
+        )
+        db.execute(
+            """INSERT INTO user_service.addresses
+            (id,user_id,recipient,line1,city,region,postal_code,country_code,is_default)
+            VALUES (%s,%s,'Release Rehearsal','1 Example St','Example','NY','10001','US',true)""",
+            (prior_address, prior_user),
+        )
+        snapshot_queries = [
+            "SELECT * FROM user_service.users ORDER BY id",
+            "SELECT * FROM user_service.invitations ORDER BY id",
+            "SELECT * FROM user_service.addresses ORDER BY id",
+            "SELECT * FROM auth.users ORDER BY id",
+            "SELECT table_name,grantee,privilege_type FROM information_schema.role_table_grants WHERE table_schema='user_service' ORDER BY 1,2,3",
+            "SELECT nspname,nspacl::text FROM pg_namespace WHERE nspname='user_service'",
+            "SELECT tablename,policyname,roles,cmd,qual,with_check FROM pg_policies WHERE schemaname='user_service' ORDER BY 1,2",
+        ]
+        before = [db.execute(query).fetchall() for query in snapshot_queries]
         for migration in sorted(Path("supabase/migrations").glob("*.sql")):
-            db.execute(migration.read_text())
+            if not migration.name.endswith("_user_service.sql"):
+                db.execute(migration.read_text())
+        assert [db.execute(query).fetchall() for query in snapshot_queries] == before
+        # Remove only these known fake rehearsal records, retaining the new schema.
+        db.execute("DELETE FROM user_service.addresses WHERE id=%s", (prior_address,))
+        db.execute("DELETE FROM user_service.invitations WHERE id=%s", (prior_invite,))
+        db.execute("DELETE FROM user_service.users WHERE id=%s", (prior_user,))
+        db.execute("DELETE FROM auth.users WHERE id=%s", (prior_auth,))
     return Store(make_conninfo(url, user="tbd_user_backend"))
 
 
@@ -1060,3 +1098,96 @@ def test_allowlisted_pilot_fixture_webhook_and_history_share_admission(store):
             ).fetchall()
         assert [r["id"] for r in rows_after] == [r["id"] for r in rows]
     messaging.adapter.close()
+
+
+def test_release_rehearsal_uvicorn_starts_with_real_role_and_healthy_owned_loop(store):
+    """Real HTTP/process/lifespan and local DB; every provider call is intercepted."""
+    import json
+    import socket
+    import subprocess
+    import sys
+    import time
+    import httpx
+
+    script = """
+import httpx
+import uvicorn
+from tbd_server.messaging.adapter import Comms
+
+def fake_provider(self, method, path, **kwargs):
+    assert method == "GET" and path == "messages", "No live or outbound provider calls in rehearsal"
+    request = httpx.Request(method, "https://provider.example.test/messages")
+    return httpx.Response(200, json={"messages": []}, request=request)
+Comms.request = fake_provider
+uvicorn.run("tbd_server.main:app", host="127.0.0.1", port=PORT, workers=1, access_log=False)
+"""
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    env = {
+        "PATH": os.environ["PATH"],
+        "PYTHONPATH": "src",
+        "DATABASE_URL": store.database_url,
+        "SUPABASE_URL": "https://auth.example.test",
+        "SUPABASE_SECRET_KEY": "fake-auth-key",
+        "JOIN_SITE_URL": "https://join.example.test",
+        "PROVISIONING_TOKEN": "fake-provision",
+        "INTERNAL_SERVICE_TOKEN": "fake-internal",
+        "ALLOWED_WEB_ORIGINS": "https://join.example.test",
+        "COMMS_API_KEY": "fake-runtime-key",
+        "COMMS_WEBHOOK_SECRET": "fake-webhook-secret",
+        "COMMS_LINE_E164": "+12125550880",
+        "MESSAGING_ACTIVATED_AT": "2026-11-08T00:00:00Z",
+        "COMMS_PILOT_CONVERSATIONS": "{}",
+    }
+    process = subprocess.Popen(
+        [sys.executable, "-c", script.replace("PORT", str(port))],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while True:
+            if process.poll() is not None:
+                pytest.fail("Uvicorn exited before readiness")
+            try:
+                response = httpx.get(f"http://127.0.0.1:{port}/healthz", timeout=0.5)
+                if response.status_code == 200:
+                    break
+            except httpx.HTTPError:
+                pass
+            if time.monotonic() > deadline:
+                pytest.fail("Uvicorn readiness deadline")
+            time.sleep(0.05)
+        assert response.json() == {"status": "ok"}
+        # Require actual worker ownership and a successful fake history call, not
+        # merely a thread alive while waiting for ownership.
+        while True:
+            with store.transaction() as cur:
+                owned = cur.execute(
+                    "SELECT count(*) AS n FROM pg_locks WHERE locktype='advisory' AND objid=843219017 AND granted"
+                ).fetchone()["n"]
+            if owned:
+                break
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        time.sleep(0.7)
+        assert httpx.get(f"http://127.0.0.1:{port}/healthz", timeout=1).status_code == 200
+    finally:
+        process.terminate()
+        stdout, stderr = process.communicate(timeout=10)
+    # Uvicorn re-raises SIGTERM after its graceful lifespan shutdown.
+    assert process.returncode in (0, -15)
+    assert "Application shutdown complete" in stderr
+    with store.transaction() as cur:
+        assert (
+            cur.execute(
+                "SELECT count(*) AS n FROM pg_locks WHERE locktype='advisory' AND objid=843219017 AND granted"
+            ).fetchone()["n"]
+            == 0
+        )
+    connection = json.loads(stdout.splitlines()[0])["database_connection_verified"]
+    assert connection["role"] == "tbd_user_backend"
+    assert '"history_sweep_complete"' in stderr and '"loop_failed"' not in stderr

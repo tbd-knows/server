@@ -171,3 +171,13 @@ wrong joined sender/unapproved conversation/line or explicit exclusions. No live
 account is contacted by these tests. Marking PR #5 ready for backend review does
 not authorize merge, production migration or deployment; both founders' explicit
 merge approval remains required and hosted proof remains TBD-20.
+
+## Final release preparation and cutover
+
+Use [release-candidate.md](release-candidate.md) for the rehearsal evidence,
+read-only production snapshot, private tester readiness, exact approval → merge →
+migration → Save-only config → one deploy → final signed-ping gates, capture
+retirement and the hosted A2/B1/interleaved/quiet-wake checklist. The earlier A1
+and setup routing messages are not hosted verification evidence. Do not begin
+production changes from these instructions until both founders approve the final
+code/private configuration and the backend is merged.
