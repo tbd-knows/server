@@ -57,8 +57,9 @@ workspace/line; verified inbound records must match that line and direct
 `imessage` classification. Sender identity comes from the provider record and
 canonical joined User lookup, never message text or Agent arguments.
 
-Apply the reviewed **unapplied** migration `20261108173259_messaging_service.sql`
-before compatible deployment. The applied User migration is unchanged. Do not
+Migration `20261108173259_messaging_service.sql` was applied in production on
+2026-11-09 before compatible deployment. Do not reapply it. For another target,
+apply the reviewed migration before compatible code after inspecting its history. The applied User migration is unchanged. Do not
 reset databases. Use the existing restricted backend role, TLS and direct or
 session-pooler connection; session advisory ownership is incompatible with
 transaction pooling. Keep Render auto-deploy off and use one existing process.
@@ -181,3 +182,42 @@ retirement and the hosted A2/B1/interleaved/quiet-wake checklist. The earlier A1
 and setup routing messages are not hosted verification evidence. Do not begin
 production changes from these instructions until both founders approve the final
 code/private configuration and the backend is merged.
+
+
+## Verified hosted pilot and ongoing operation
+
+[2026-11-09 evidence](hosted-pilot-evidence.md) records the final deployed commit,
+migration safety, A+B routes, measured timings and quiet/wake recovery. Keep the
+approved activation `2026-11-09T03:30:00Z` fixed; do not advance it to discard
+backlog. Reconcile unexpected eligible backlog explicitly before deployment.
+
+- Keep the final received+ping registration and its own secret matched to runtime.
+  The temporary capture registration was retired and local receiver/tunnel stopped.
+  The setup key is not a runtime variable. Keep private evidence secure; temporary
+  staging under /private/tmp is not durable credential storage. Runtime secrets
+  remain in Render; preserve the private evidence/config reference securely for
+  operations before local temporary files expire. Never publish contacts or keys.
+- To stage variables without deployment, use Render Dashboard **Save only** and
+  inspect deploy history. The connected environment-update tool triggered a deploy
+  during this pilot despite auto-deploy being off; do not use it as Save-only.
+  For a reviewed code release, verify schema compatibility and all required values
+  before one intentional deploy, then verify the exact merged SHA and loop health.
+- Supabase CLI 3.0.0 used an explicit target because this checkout was unlinked:
+  `npx --yes supabase@3.0.0 db push --remote=xclftpnjwrmakooaaxik --skip-vault --dry-run`.
+  Read installed help, confirm exactly reviewed pending migrations and target, then
+  apply with the same flags minus --dry-run only when authorized. Do not reset or
+  include roles/seeds. Verify the real client TLS session, not pg_stat_ssl behind
+  a pooler; the connector's inability to SET ROLE does not diagnose runtime access.
+- On Free sleep, do not health-poll while measuring idle. Use control-plane logs
+  to confirm shutdown and restricted-session lock release. In this pass the inbound
+  webhook woke the service, its first delivery timed out, startup history recovered
+  A5, and webhook retry replayed it safely. No manual wake was needed. If a future
+  retained message does not wake the service, record one explicit wake request and
+  inspect the same native ID/job afterward; don't ask for a replacement text/send.
+- A provider delivered/read status without delivered_at does not establish a
+  delivery timestamp. Keep source-to-acceptance/status-observation times separate.
+  Known-ID uncertainty is GET reconciliation, never a replacement send/key.
+- Free 100/day was reported and at least 20 available confirmed before this pass.
+  Allocation16 used/4 reserve is bookkeeping, not a live allowance reading.
+  Check actual availability before more tests; reset time and inbound accounting
+  remain unverified. Keep both testers paused after the completed pass.

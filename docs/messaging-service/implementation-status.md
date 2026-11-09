@@ -1,139 +1,65 @@
-# TBD-18 — Comms Free backend review checkpoint
+# Messaging v1 — implementation status
 
-Updated 2026-11-08. PR #5 proceeds to **backend review** under the founder-approved
-plain-text conversation allowlist rule in [design.md](design.md). TBD-18 remains
-In Progress for review/corrections; no merge or deployment is authorized here.
-Work stays in the original `server` checkout on `messaging-v1-implementer`, including
-current main `3370855`. Both founders must explicitly approve merging.
+Updated 2026-11-09. Backend [PR #5](https://github.com/tbd-knows/server/pull/5)
+is merged at `8377754a3755a1c063c77bcb3a4fa3e33f361718` and deployed on the
+existing Render service, deploy `dep-dbovjnui0phs73eutvm0`. Both founders' final
+release/cutoff approvals were explicitly confirmed by the user before cutover.
 
-## Final pilot behavior
+The reviewed Messaging migration is applied. Production User data/grants survived;
+runtime role, TLS/session pooling, advisory ownership, health and final signed
+ping passed. Confirmed A+B conversation/phone pairs and all credentials remain in
+private configuration. Activation is fixed at `2026-11-09T03:30:00Z`.
 
-Join establishes eligibility and creates zero Messaging rows. One private message
-table, one adapter and one session-owned lifespan delivery loop run in the existing
-FastAPI service. The released User migration and User Store contract are unchanged.
-Only the unapplied Messaging migration is part of the proposed release.
+## Implemented contract
 
-`COMMS_PILOT_CONVERSATIONS` is a validated server-only JSON mapping of confirmed
-one-to-one conversation IDs to approved E.164 tester phones, initially Pilot A.
-Missing/empty config admits nothing. The private Pilot A mapping is prepared at
-`/private/tmp/tbd-comms-capture/pilot-conversations.private.json`, not deployed.
-No real conversation/phone pair or credentials are committed.
+Join sends nothing. Verified webhook and authenticated history use the same
+approved conversation/phone/shared-line admission rule and canonical joined-User
+lookup. Missing audience/attachments permits only nonempty plain text for those
+confirmed pairs; explicit excluded evidence overrides approval. This remains a
+bounded pilot rule, not a provider-wide omission guarantee.
 
-Signed `/webhooks/comms` intake and authenticated inbound-history recovery share
-the exact same adapter gate. Matching conversation + approved phone + configured
-shared line may omit audience/attachments for nonempty text. Present-null/invalid
-classification fails validation; explicit group/media, excluded event, unsend,
-self/outbound or non-iMessage evidence overrides the pilot approval. Media is
-ignored in this text-only pilot. Canonical joined-User resolution/locking, source
-activation/User-creation boundaries, exact text, immutable replay checks and
-atomic inbound + one fixed queued reply still apply. The allowlist is an approved
-pilot restriction, not a provider-wide claim about omitted fields.
+One private table atomically stores inbound text and one queued reply. One
+session-owned delivery loop sends explicit iMessage replies in the stored
+conversation using the outbound UUID as its stable key. Known IDs use exact-ID
+history; uncertainty, retry windows, account pauses and per-conversation order
+remain as designed. Sent/delivered/read map to local sent while preserving the
+observed provider status. History is capped at 200 and uses the fixed activation.
+No Join welcome, Agent execution, or extra service/table/loop was added. Timing
+settings stayed unchanged throughout the hosted pass.
 
-Outbound requests use the stored conversation/body, explicit iMessage channel and
-outbound UUID idempotency key. Known IDs are read by exact-ID conversation history;
-unknown no-ID retries preserve the key/payload within the conservative 24-hour
-window, then hold uncertain. Verified sent/delivered/read maps to existing local
-sent while retaining the observed provider status. Queued/unknown do not release
-the route. Due/error fields persist account pauses. History uses fixed activation,
-limit 200 and oldest-first handling, logging possible incomplete coverage at cap.
-Safe stage/queue logs and loop health expose delays/failures without contacts/bodies.
+## Verification
 
-## Executed verification
+Runtime/test candidate `aa55e6d94679940fa091125b764ea87e4fd384ae`: **146 passed,
+zero skipped**, using disposable local PostgreSQL and controlled HTTP. Ruff,
+format and whitespace checks passed; one existing upstream Starlette/AnyIO warning.
+The later pre-merge documentation commit changed no runtime/test/migration code.
+Automated tests did not contact live Comms or use the hosted database.
 
-```bash
-PATH=/opt/homebrew/opt/postgresql@17/bin:$PATH uv run --locked python scripts/run_database_tests.py -q
-uv run --locked ruff check src tests scripts
-uv run --locked ruff format --check src tests scripts
-git diff --check
-```
+Coverage includes constraints, atomicity, identity/permissions, immutable routing,
+concurrency/replay, stable-key retries/window limits, exact-ID unknown-to-read
+reconciliation, history cap, restricted-role Uvicorn startup/loop ownership and
+User Service regressions. The populated released-User-schema migration rehearsal
+preserves existing rows, grants/schema ACL and policies.
 
-**146 passed, zero skipped**, disposable local PostgreSQL over TCP and the actual
-restricted backend role, plus controlled HTTP. One existing Starlette/AnyIO
-warning. Automated tests never contact the live provider or hosted database.
+The two backend review fixes are included: only tbd.messaging gets INFO stderr
+configuration, and Comms HTTP 401/402/403/429 classification occurs before JSON
+parsing, including empty/non-JSON response tests.
 
-The actual sanitized Pilot A fixture is exercised through signature-verified HTTP
-and real SQL: exact inbound text and one pending fixed reply; duplicate webhook
-and authenticated history replay create no extra rows. A wrong **joined** sender,
-unapproved conversation, wrong line and explicit group/media/excluded evidence
-produce no additional replies through either path. Tests also cover empty
-allowlists, empty text and invalid/null classification. Existing constraint,
-permission, transaction, concurrency, ownership, retry/window/status/order and
-User Service regressions pass. Exact-ID unknown-to-read releases the next job;
-wrong-ID read and stale unknown cannot release/regress terminal work.
+## Hosted evidence and operations
 
-## Actual provider evidence and its limits
+[Hosted pilot evidence](hosted-pilot-evidence.md) records real A/B replies, four
+interleaved messages, zero outgoing rows from repeat Join, and actual spin-down/
+startup recovery. Each eligible text has one inbound, one linked outbound and one
+send attempt. Final totals: six Users, nine inbound/nine outbound, no pending
+jobs. Both tester threads and exact-one reply counts are handset-confirmed.
 
-[Sanitized actual records](fixtures/comms-free-pilot-a.json) and
-[Pilot A evidence](pilot-a-evidence.md) record a verified ping/inbound, matching
-history/conversation, retained full `app-tbd`-prefixed first text, one manual
-stable-key explicit-iMessage reply and exactly one same-thread handset arrival.
-Original HTTP 202 unknown acceptance/history is preserved beside the later exact-ID
-read result at `23:05:38.437356Z` (provider read_at `22:56:05.218Z`). No replacement
-send was needed. Real contacts, native identifiers, signatures and keys stay private.
+Provider sent_at/delivered_at fields were unavailable; backend status-observation
+times are reported separately from handset observations. Free allowance reset
+and inbound accounting, longer-term history retention, and general omitted-field
+semantics remain documented pilot limits. No latency target or tuning was added.
 
-This early account proof and the controlled backend tests are separate evidence.
-The new allowlisted backend has not been deployed. General provider omission
-semantics, media/group handling and retention limits are not claimed; the approved
-plain-text pilot is deliberately bounded to confirmed conversation/phone pairs.
-Actual two-tester hosted exchange, timing/burst/quiet-wake checks, final secure
-configuration and migration-before-deploy verification remain TBD-20 **after**
-backend review, both founders' explicit merge approvals and merge. No production
-migration, hosting configuration, live provider send or account reset occurred in
-this allowlist implementation.
-
-## Focused review corrections
-
-Messaging startup configures only `tbd.messaging` with an INFO stderr handler and
-JSON-message formatting, without propagation or root/provider logger changes.
-A subprocess loads the real app through the documented Uvicorn logging settings
-(fake configuration, database verification stubbed, no live I/O). Reinitializing
-the logger still emits exactly one sanitized event on stderr:
-
-```json
-{"event": "logging_smoke", "request_id": "fake-request", "state": "pending"}
-```
-
-Comms sends now classify HTTP 401/402/403 before JSON parsing, preserving the
-existing 60-second configuration and 3,600-second quota pauses even for empty or
-non-JSON bodies. Existing 429 parsing/fallback behavior is unchanged. Focused
-empty/HTML tests cover all four status codes. The full disposable PostgreSQL suite
-passes **144 tests, zero skipped**; Ruff/format/whitespace pass. One existing
-upstream warning remains. Both fixes are ready for focused re-review in PR #5;
-TBD-18 stays In Progress. No live provider call, production migration/deployment
-or merge occurred for these corrections.
-
-## Final release-candidate preparation
-
-The initial PR/local head matched reviewed aa48cac. Read-only Render/Supabase/
-Comms preflight and private Pilot A checks are recorded in
-[release-candidate.md](release-candidate.md), together with the exact approved
-migration/config/one-deploy/final-ping stop gates and hosted A2/B1/burst/wake pass.
-Production still runs the old User release; Messaging is unapplied and undeployed.
-Pilot A is approved/joined and mapped privately. Pilot B's approved joined User
-reference, one-to-one setup text and authenticated conversation are now verified;
-the two distinct pairs are combined privately (0600). No B reply was sent.
-
-The shared PostgreSQL harness now rehearses migration over existing fake User,
-Auth, invitation/address data and compares rows, grants/schema ACL and policies.
-A real local Uvicorn process proves the restricted role, exclusive delivery-loop
-ownership, fake history, healthy HTTP and graceful shutdown/lock release. Added
-one small rollout log, `webhook_ping_verified`, only after successful HMAC ping
-verification, with a focused no-message-work/bad-signature regression. No new
-service/table/adapter/loop or child PR. Final full suite: **146 passed, zero
-skipped**; lint/format/whitespace pass, one existing upstream warning. Targeted
-rehearsal: **1 passed, zero skipped**. No production mutation or live send.
-
-PR #5 stays open for one founder review of this final diff/private configuration;
-prior aa48cac review is not approval of the new candidate. TBD-18 remains In
-Progress through approval/merge; TBD-20 remains pending actual hosted verification.
-This round stops at the reviewable candidate, not cutover. Close TBD-17 only after
-both children and their linked evidence are complete.
-
-Pilot B readiness update: the `app-tbd TBD setup B1` record at
-`2026-11-09T03:19:05.543Z` matched the privately approved sender/shared line and
-independent conversation in the runtime-key read at `03:22:55.311711Z`. One-to-one
-handset confirmation is recorded; founder observed delivery and no automatic
-reply. A+B mapping has two entries with A unchanged, saved privately mode 0600.
-This documentation-only update changes no runtime/test/migration code from the
-146-passing aa55e6d candidate. Hold further tester texts until approved cutover;
-PR #5 remains open and no deployment, provider send or registration change occurs.
+[setup.md](setup.md) contains ongoing operations. The
+[release checklist](release-candidate.md) is an archived pre-cutover plan; actual
+procedural deviations and results are in the hosted evidence. The earlier
+[Pilot A account proof](pilot-a-evidence.md) remains separate from deployed proof.
+This evidence update changes documentation only; it requires no redeployment.

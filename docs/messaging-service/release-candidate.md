@@ -1,6 +1,11 @@
 # Messaging v1 — release candidate and one cutover
 
-Status: prepared for final founder review; **not approval to merge or deploy**.
+Archived pre-cutover checklist, executed 2026-11-09. PR #5 is merged and the
+hosted pass is complete; see [actual results and deviations](hosted-pilot-evidence.md).
+The prospective wording below records the reviewed plan, not current status.
+Do not rerun the migration or deploy from this archived checklist.
+
+Original status: prepared for final founder review; **not approval to merge or deploy**.
 PR #5 stays open. TBD-18 stays In Progress through approval and merge; TBD-20
 remains pending live verification. No child PR is needed: this preparation adds
 migration/startup rehearsal and one safe signed-ping log to the existing scope.
