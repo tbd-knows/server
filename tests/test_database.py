@@ -1191,3 +1191,493 @@ uvicorn.run("tbd_server.main:app", host="127.0.0.1", port=PORT, workers=1, acces
     connection = json.loads(stdout.splitlines()[0])["database_connection_verified"]
     assert connection["role"] == "tbd_user_backend"
     assert '"history_sweep_complete"' in stderr and '"loop_failed"' not in stderr
+
+
+# Card rollouts use the same local cluster/released-schema rehearsal above.
+@pytest.fixture
+def card_thread(store):
+    from datetime import datetime, timezone
+    from tbd_server.messaging.core import ReceivedMessage, receive_message
+
+    entry, auth_id = approved(store)
+    user = store.join(auth_id, entry["email"])
+    account, conversation = "+12125550188", "fake-card-" + str(uuid4())
+    event = ReceivedMessage(
+        str(uuid4()), account, user["phone"], "fake card eligibility", False, datetime.now(timezone.utc), conversation
+    )
+    with store.transaction() as cur:
+        inbound = receive_message(cur, event, user["created_at"])
+        reply = cur.execute(
+            "SELECT * FROM messaging.messages WHERE reply_to_message_id=%s", (inbound["id"],)
+        ).fetchone()
+        cur.execute(
+            "UPDATE messaging.messages SET state='sent',attempt_id=%s,provider_message_id=%s,sent_observed_at=now() WHERE id=%s",
+            (uuid4(), "fake-reply-" + str(uuid4()), reply["id"]),
+        )
+    context = {
+        "store": store,
+        "user": user,
+        "account": account,
+        "pairs": {conversation: user["phone"]},
+        "conversation": conversation,
+        "reply_id": reply["id"],
+    }
+    yield context
+    with psycopg.connect(os.environ["TEST_DATABASE_URL"]) as db:
+        db.execute("DELETE FROM messaging.contact_cards WHERE user_id=%s", (user["id"],))
+
+
+def test_cards_existing_new_threads_and_replay(card_thread):
+    from tbd_server.messaging.cards import enqueue
+
+    c = card_thread
+    with c["store"].transaction() as cur:
+        cur.execute("UPDATE messaging.messages SET state='pending' WHERE id=%s", (c["reply_id"],))
+        enqueue(cur, c["account"], c["pairs"])
+        assert (
+            cur.execute(
+                "SELECT count(*) AS n FROM messaging.contact_cards WHERE user_id=%s", (c["user"]["id"],)
+            ).fetchone()["n"]
+            == 0
+        )
+        cur.execute("UPDATE messaging.messages SET state='sent' WHERE id=%s", (c["reply_id"],))
+        enqueue(cur, c["account"], c["pairs"])
+        enqueue(cur, c["account"], c["pairs"])
+        assert (
+            cur.execute(
+                "SELECT count(*) AS n FROM messaging.contact_cards WHERE user_id=%s", (c["user"]["id"],)
+            ).fetchone()["n"]
+            == 1
+        )
+        # Wrong configured number/pair/conversation cannot add another card.
+        enqueue(cur, "+12125550189", c["pairs"])
+        enqueue(cur, c["account"], {c["conversation"]: "+12125550190", "unapproved-thread": c["user"]["phone"]})
+        assert (
+            cur.execute(
+                "SELECT count(*) AS n FROM messaging.contact_cards WHERE user_id=%s", (c["user"]["id"],)
+            ).fetchone()["n"]
+            == 1
+        )
+
+
+def test_cards_concurrent_claim_restart_and_expired_uncertainty(card_thread):
+    from tbd_server.messaging.cards import enqueue, claim_card
+
+    c = card_thread
+
+    def do_claim(_):
+        with c["store"].transaction() as cur:
+            enqueue(cur, c["account"], c["pairs"])
+            return claim_card(cur, c["account"], c["pairs"])
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        rows = list(pool.map(do_claim, range(2)))
+    job = next(r for r in rows if r is not None)
+    assert len([r for r in rows if r is not None]) == 1
+    with c["store"].transaction() as cur:
+        # Lost process: wait out the persisted lease before reclaiming the same key.
+        assert claim_card(cur, c["account"], c["pairs"]) is None
+        cur.execute(
+            "UPDATE messaging.contact_cards SET next_action_at=now()-interval '1 second' WHERE id=%s", (job["id"],)
+        )
+        recovered = claim_card(cur, c["account"], c["pairs"])
+        assert recovered["idempotency_key"] == job["idempotency_key"] and recovered["attempt_count"] == 2
+        cur.execute(
+            "UPDATE messaging.contact_cards SET first_attempt_at=now()-interval '25 hours',next_action_at=now() WHERE id=%s",
+            (job["id"],),
+        )
+        assert claim_card(cur, c["account"], c["pairs"]) is None
+        assert (
+            cur.execute("SELECT error_code FROM messaging.contact_cards WHERE id=%s", (job["id"],)).fetchone()[
+                "error_code"
+            ]
+            == "idempotency_expired"
+        )
+
+
+def test_cards_import_pilot_a_then_never_claim_or_repeat(card_thread):
+    from tbd_server.messaging.cards import identity, PHOTO_SHA, import_verified, enqueue, claim_card
+    from tbd_server.messaging.adapter import SendResult
+
+    c = card_thread
+    digest, key = identity(c["account"], c["conversation"])
+    evidence = {
+        "conversation_id": c["conversation"],
+        "attempt_state": "accepted",
+        "payload_sha256": digest,
+        "idempotency_key": key,
+        "photo_sha256": PHOTO_SHA,
+        "provider_message_id": "fake-existing-card",
+    }
+    summary = {
+        "card_received_in_original_thread_confirmed": True,
+        "saved_contact_logo_visible_in_messages_confirmed": True,
+    }
+    verified = SendResult("sent", "fake-existing-card", observed_status="read", response_body="")
+    with c["store"].transaction() as cur:
+        imported = import_verified(cur, c["account"], c["pairs"], evidence, summary, verified)
+        assert import_verified(cur, c["account"], c["pairs"], evidence, summary, verified) == imported
+        enqueue(cur, c["account"], c["pairs"])
+        assert claim_card(cur, c["account"], c["pairs"]) is None
+        row = cur.execute("SELECT * FROM messaging.contact_cards WHERE id=%s", (imported,)).fetchone()
+        assert (
+            row["state"] == "sent" and row["attempt_count"] == 0 and row["provider_message_id"] == "fake-existing-card"
+        )
+    with pytest.raises(ValueError):
+        with c["store"].transaction() as cur:
+            import_verified(
+                cur, c["account"], c["pairs"], {**evidence, "provider_message_id": "wrong"}, summary, verified
+            )
+
+
+def test_cards_permissions_canonical_join_recheck_and_isolated_failure(card_thread):
+    from tbd_server.messaging.cards import enqueue, claim_card, record_card_result
+    from tbd_server.messaging.adapter import SendResult
+
+    c = card_thread
+    with c["store"].transaction() as cur:
+        enqueue(cur, c["account"], c["pairs"])
+        before = cur.execute(
+            "SELECT * FROM messaging.messages WHERE user_id=%s ORDER BY id", (c["user"]["id"],)
+        ).fetchall()
+        cur.execute(
+            "UPDATE user_service.invitations SET joined_user_id=NULL WHERE joined_user_id=%s", (c["user"]["id"],)
+        )
+        assert claim_card(cur, c["account"], c["pairs"]) is None
+        cur.execute(
+            "UPDATE user_service.invitations SET joined_user_id=%s WHERE auth_user_id=%s",
+            (c["user"]["id"], c["user"]["auth_user_id"]),
+        )
+        job = claim_card(cur, c["account"], c["pairs"])
+        assert record_card_result(cur, job, SendResult("failed", error_code="request_rejected"))
+        assert (
+            cur.execute("SELECT * FROM messaging.messages WHERE user_id=%s ORDER BY id", (c["user"]["id"],)).fetchall()
+            == before
+        )
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        with c["store"].transaction() as cur:
+            cur.execute("UPDATE messaging.contact_cards SET peer_ref='+12125550191'")
+    for role in ("anon", "authenticated"):
+        with psycopg.connect(os.environ["TEST_DATABASE_URL"]) as db:
+            db.execute(psycopg.sql.SQL("SET ROLE {}").format(psycopg.sql.Identifier(role)))
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                db.execute("SELECT * FROM messaging.contact_cards")
+
+
+def test_cards_background_io_cannot_block_reply_and_one_in_flight(card_thread):
+    from threading import Event
+    from unittest.mock import Mock
+    from tbd_server.messaging.runtime import DeliveryLoop
+    from tbd_server.messaging.adapter import SendResult
+
+    c = card_thread
+    started, release = Event(), Event()
+    adapter = Mock()
+
+    def slow_card(job):
+        started.set()
+        assert release.wait(5)
+        return SendResult("failed", error_code="request_rejected")
+
+    adapter.send_card.side_effect = slow_card
+    loop = DeliveryLoop(c["store"].database_url, adapter, c["account"], lambda *_: False, card_pairs=c["pairs"])
+    loop.last_send = 0
+    try:
+        with psycopg.connect(c["store"].database_url, autocommit=True, row_factory=psycopg.rows.dict_row) as db:
+            loop.card_turn(db)
+            assert started.wait(2)
+            loop.card_turn(db)
+            assert adapter.send_card.call_count == 1
+            # A newly due normal reply progresses while the card HTTP is blocked.
+            db.execute(
+                "UPDATE messaging.messages SET state='pending',attempt_id=NULL,provider_message_id=NULL WHERE id=%s",
+                (c["reply_id"],),
+            )
+            loop.category = 1
+            loop.last_send = 0
+            adapter.send.return_value = SendResult("sent", "fake-new-normal", observed_status="sent")
+            loop.turn(db)
+            assert adapter.send.call_count == 1
+            assert (
+                db.execute("SELECT state FROM messaging.messages WHERE id=%s", (c["reply_id"],)).fetchone()["state"]
+                == "sent"
+            )
+            release.set()
+            loop.card_operation[1].result(timeout=2)
+            loop.finish_card(db)
+            assert (
+                db.execute("SELECT state FROM messaging.messages WHERE id=%s", (c["reply_id"],)).fetchone()["state"]
+                == "sent"
+            )
+            assert (
+                db.execute("SELECT state FROM messaging.contact_cards WHERE user_id=%s", (c["user"]["id"],)).fetchone()[
+                    "state"
+                ]
+                == "failed"
+            )
+    finally:
+        release.set()
+        if loop.card_executor:
+            loop.card_executor.shutdown(wait=True)
+
+
+def test_card_known_id_restart_uses_get_and_stale_attempt_cannot_rewrite(card_thread):
+    from tbd_server.messaging.cards import enqueue, claim_card, record_card_result
+    from tbd_server.messaging.adapter import SendResult
+
+    c = card_thread
+    with c["store"].transaction() as cur:
+        enqueue(cur, c["account"], c["pairs"])
+        first = claim_card(cur, c["account"], c["pairs"])
+        assert record_card_result(
+            cur, first, SendResult("uncertain", "fake-known-card", observed_status="unknown", response_body="")
+        )
+        cur.execute("UPDATE messaging.contact_cards SET next_action_at=now() WHERE id=%s", (first["id"],))
+        read_job = claim_card(cur, c["account"], c["pairs"])
+        assert read_job["provider_message_id"] == "fake-known-card" and read_job["response_body"] == ""
+        assert read_job["attempt_count"] == 1 and read_job["idempotency_key"] == first["idempotency_key"]
+        assert not record_card_result(cur, first, SendResult("failed", error_code="stale"))
+        assert record_card_result(
+            cur, read_job, SendResult("sent", "fake-known-card", observed_status="read", response_body="")
+        )
+        assert not record_card_result(cur, read_job, SendResult("uncertain", "fake-known-card", response_body=""))
+        assert claim_card(cur, c["account"], c["pairs"]) is None
+
+
+def test_card_global_lease_prevents_second_conversation_claim(card_thread):
+    from datetime import datetime, timezone
+    from tbd_server.messaging.core import ReceivedMessage, receive_message
+    from tbd_server.messaging.cards import enqueue, claim_card
+
+    c = card_thread
+    other = "fake-second-card-" + str(uuid4())
+    pairs = {**c["pairs"], other: c["user"]["phone"]}
+    with c["store"].transaction() as cur:
+        received = receive_message(
+            cur,
+            ReceivedMessage(
+                str(uuid4()),
+                c["account"],
+                c["user"]["phone"],
+                "another thread",
+                False,
+                datetime.now(timezone.utc),
+                other,
+            ),
+            c["user"]["created_at"],
+        )
+        cur.execute(
+            "UPDATE messaging.messages SET state='sent',provider_message_id=%s,attempt_id=%s,sent_observed_at=now() WHERE reply_to_message_id=%s",
+            ("fake-other-reply-" + str(uuid4()), uuid4(), received["id"]),
+        )
+        enqueue(cur, c["account"], pairs)
+        assert (
+            cur.execute(
+                "SELECT count(*) AS n FROM messaging.contact_cards WHERE user_id=%s", (c["user"]["id"],)
+            ).fetchone()["n"]
+            == 2
+        )
+        assert claim_card(cur, c["account"], pairs) is not None
+        assert claim_card(cur, c["account"], pairs) is None
+
+
+def test_card_reply_priority_and_pacing_before_launch(card_thread):
+    from unittest.mock import Mock
+    from time import monotonic
+    from tbd_server.messaging.runtime import DeliveryLoop
+
+    c = card_thread
+    adapter = Mock()
+    loop = DeliveryLoop(c["store"].database_url, adapter, c["account"], lambda *_: False, card_pairs=c["pairs"])
+    with psycopg.connect(c["store"].database_url, autocommit=True, row_factory=psycopg.rows.dict_row) as db:
+        loop.last_send = monotonic()
+        loop.card_turn(db)
+        assert loop.card_operation is None  # same pacing budget as replies
+        loop.last_send = 0
+        db.execute("UPDATE messaging.messages SET state='pending' WHERE id=%s", (c["reply_id"],))
+        loop.card_turn(db)
+        assert loop.card_operation is None and not adapter.send_card.called
+        # With rollout disabled, no ledger or provider work is needed.
+        disabled = DeliveryLoop(c["store"].database_url, adapter, c["account"], lambda *_: False)
+        disabled.card_turn(db)
+        assert not adapter.send_card.called
+
+
+def test_cards_enabled_startup_requires_imported_pilot_record(card_thread):
+    from tbd_server.messaging.service import Messaging
+    from tbd_server.messaging.cards import identity, PHOTO_SHA, import_verified
+    from tbd_server.messaging.adapter import SendResult
+
+    c = card_thread
+    service = Messaging(
+        c["store"],
+        "fake",
+        "fake-secret",
+        c["account"],
+        "2026-11-08T00:00:00Z",
+        pilot_conversations=c["pairs"],
+        cards_enabled=True,
+    )
+    try:
+        with pytest.raises(Problem, match="Import verified"):
+            service.verify_schema()
+        digest, key = identity(c["account"], c["conversation"])
+        evidence = {
+            "conversation_id": c["conversation"],
+            "attempt_state": "accepted",
+            "payload_sha256": digest,
+            "idempotency_key": key,
+            "photo_sha256": PHOTO_SHA,
+            "provider_message_id": "fake-startup-import-" + str(uuid4()),
+        }
+        with c["store"].transaction() as cur:
+            import_verified(
+                cur,
+                c["account"],
+                c["pairs"],
+                evidence,
+                {
+                    "card_received_in_original_thread_confirmed": True,
+                    "saved_contact_logo_visible_in_messages_confirmed": True,
+                },
+                SendResult("sent", evidence["provider_message_id"], observed_status="sent", response_body=""),
+            )
+        service.verify_schema()
+    finally:
+        service.adapter.close()
+
+
+def test_card_import_cli_only_gets_exact_history(card_thread, tmp_path, monkeypatch, capsys):
+    import json
+    import httpx
+    from tbd_server.messaging import cards
+    from tbd_server.messaging.adapter import Comms
+
+    c = card_thread
+    digest, key = cards.identity(c["account"], c["conversation"])
+    message = {
+        "id": "fake-cli-card-" + str(uuid4()),
+        "conversation_id": c["conversation"],
+        "line_e164": c["account"],
+        "direction": "outbound",
+        "channel": "imessage",
+        "body": "",
+        "status": "read",
+    }
+    evidence = {
+        "conversation_id": c["conversation"],
+        "attempt_state": "accepted",
+        "payload_sha256": digest,
+        "idempotency_key": key,
+        "photo_sha256": cards.PHOTO_SHA,
+        "provider_message_id": message["id"],
+        "response": {"message": message, "contact_card": {"name": "TBD", "phone": c["account"]}},
+    }
+    summary = {
+        "card_received_in_original_thread_confirmed": True,
+        "saved_contact_logo_visible_in_messages_confirmed": True,
+    }
+    first, second = tmp_path / "evidence.json", tmp_path / "summary.json"
+    first.write_text(json.dumps(evidence))
+    second.write_text(json.dumps(summary))
+    requests = []
+
+    def provider(request):
+        requests.append(request)
+        assert request.method == "GET"
+        return httpx.Response(200, json={"messages": [message]})
+
+    monkeypatch.setattr("sys.argv", ["cards", str(first), str(second)])
+    for k, v in {
+        "DATABASE_URL": c["store"].database_url,
+        "COMMS_LINE_E164": c["account"],
+        "COMMS_PILOT_CONVERSATIONS": json.dumps(c["pairs"]),
+        "COMMS_API_KEY": "fake",
+    }.items():
+        monkeypatch.setenv(k, v)
+    # Patch the imported adapter factory, preserving the real card classifier.
+    import tbd_server.messaging.adapter as module
+
+    monkeypatch.setattr(module, "Comms", lambda _: Comms("fake", transport=httpx.MockTransport(provider)))
+    cards.main()
+    cards.main()
+    assert len(requests) == 2 and '"card_sent": false' in capsys.readouterr().out
+    with c["store"].transaction() as cur:
+        row = cur.execute("SELECT * FROM messaging.contact_cards WHERE user_id=%s", (c["user"]["id"],)).fetchone()
+        assert row["state"] == "sent" and row["provider_message_id"] == message["id"] and row["attempt_count"] == 0
+
+
+def test_card_result_commit_retry_retains_known_id_without_repost(card_thread, monkeypatch):
+    from concurrent.futures import Future
+    from unittest.mock import Mock
+    from tbd_server.messaging import cards
+    from tbd_server.messaging.runtime import DeliveryLoop
+    from tbd_server.messaging.adapter import SendResult
+
+    c = card_thread
+    with c["store"].transaction() as cur:
+        cards.enqueue(cur, c["account"], c["pairs"])
+        job = cards.claim_card(cur, c["account"], c["pairs"])
+    future = Future()
+    future.set_result(SendResult("sent", "fake-commit-card", observed_status="sent", response_body=""))
+    loop = DeliveryLoop(c["store"].database_url, Mock(), c["account"], lambda *_: False, card_pairs=c["pairs"])
+    loop.card_operation = (job, future)
+    with psycopg.connect(c["store"].database_url, autocommit=True, row_factory=psycopg.rows.dict_row) as db:
+        with monkeypatch.context() as m:
+            m.setattr(cards, "record_card_result", Mock(side_effect=psycopg.OperationalError("fake commit loss")))
+            loop.finish_card(db)
+            assert loop.card_operation is not None
+        loop.finish_card(db)
+        assert loop.card_operation is None
+        row = db.execute("SELECT * FROM messaging.contact_cards WHERE id=%s", (job["id"],)).fetchone()
+        assert row["state"] == "sent" and row["provider_message_id"] == "fake-commit-card"
+        assert not loop.adapter.send_card.called
+
+
+def test_card_quota_only_records_ledger_and_honors_shared_account_pause(card_thread):
+    from unittest.mock import Mock
+    from tbd_server.messaging.cards import enqueue, claim_card, record_card_result
+    from tbd_server.messaging.adapter import SendResult
+    from tbd_server.messaging.runtime import DeliveryLoop
+
+    c = card_thread
+    with c["store"].transaction() as cur:
+        before = cur.execute("SELECT * FROM messaging.messages WHERE id=%s", (c["reply_id"],)).fetchone()
+        enqueue(cur, c["account"], c["pairs"])
+        job = claim_card(cur, c["account"], c["pairs"])
+        record_card_result(cur, job, SendResult("pending", error_code="quota", retry_after=3600))
+        assert cur.execute("SELECT * FROM messaging.messages WHERE id=%s", (c["reply_id"],)).fetchone() == before
+    adapter = Mock()
+    loop = DeliveryLoop(c["store"].database_url, adapter, c["account"], lambda *_: False, card_pairs=c["pairs"])
+    with psycopg.connect(c["store"].database_url, autocommit=True, row_factory=psycopg.rows.dict_row) as db:
+        loop.turn(db)
+    assert not adapter.send.called and not adapter.send_card.called
+
+
+def test_card_orderly_stop_flushes_completed_outcome(card_thread):
+    from concurrent.futures import Future
+    from unittest.mock import Mock
+    from tbd_server.messaging.cards import enqueue, claim_card
+    from tbd_server.messaging.runtime import DeliveryLoop
+    from tbd_server.messaging.adapter import SendResult
+
+    c = card_thread
+    with c["store"].transaction() as cur:
+        enqueue(cur, c["account"], c["pairs"])
+        job = claim_card(cur, c["account"], c["pairs"])
+    future = Future()
+    future.set_result(SendResult("sent", "fake-shutdown-card", observed_status="sent", response_body=""))
+    adapter = Mock()
+    loop = DeliveryLoop(c["store"].database_url, adapter, c["account"], lambda *_: False, card_pairs=c["pairs"])
+    loop.card_operation = (job, future)
+    loop.card_executor = Mock()
+    loop.stop()
+    assert loop.card_operation is None
+    adapter.close.assert_called_once()
+    with c["store"].transaction() as cur:
+        row = cur.execute("SELECT * FROM messaging.contact_cards WHERE id=%s", (job["id"],)).fetchone()
+        assert row["state"] == "sent" and row["provider_message_id"] == "fake-shutdown-card"
+        assert (
+            cur.execute("SELECT state FROM messaging.messages WHERE id=%s", (c["reply_id"],)).fetchone()["state"]
+            == "sent"
+        )

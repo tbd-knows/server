@@ -4,7 +4,7 @@
 
 A tester completes Join, then texts TBD on the Comms by Osis Free shared number. Messaging verifies the sender, stores each new direct iMessage and queues one “Received your text.” reply in the same conversation. Join establishes eligibility and creates no outbound message.
 
-One module, one private Supabase Postgres table, one delivery loop and one Comms adapter run in the existing Python/FastAPI app on Render. [Editable architecture](architecture.excalidraw) · [Linear project](https://linear.app/apt-knows/project/messaging-service-ec91f9125e1b/overview).
+One module, one private message table plus a contact-card ledger, one delivery loop and one Comms adapter run in the existing Python/FastAPI app on Render. [Editable architecture](architecture.excalidraw) · [Linear project](https://linear.app/apt-knows/project/messaging-service-ec91f9125e1b/overview).
 
 ## Background Information / Context
 
@@ -120,6 +120,23 @@ A joined tester texts the shared line, sees one reply in the same iMessage conve
 | AC6 — Observability | Safe stage, queue, quota and error evidence. Pilot timings are measured on the actual path. |
 | AC7 — Data safety | Local PostgreSQL transaction/permission checks and User Service regressions pass. |
 | AC8 — Hosted pilot | Two joined testers initiate and receive separate same-thread iMessage replies through Comms Free. Confirm routing, one reply per supported message and quiet/wake behavior. |
+
+## Contact card follow-up (TBD-21)
+
+After a conversation's first successful reply, send one saveable TBD contact card
+using the existing Free shared line. A private ledger, separate from message
+rows, persists one obligation/key per line and conversation. Current approved
+pair, canonical joined User/phone and successful reply are required for existing
+and future threads. Import Pilot A's verified manual card before enabling sends;
+later replies never resend it. The existing delivery loop prioritizes replies
+and reserves shared Comms pacing for at most one bounded card request in flight.
+Card outcomes stay in the ledger and do not change reply state; known IDs use
+exact route/body-aware history, and uncertainty retains the original key.
+
+This is opt-in behind COMMS_CONTACT_CARDS_ENABLED (default false), a reviewed
+additive migration and private import. No backdrop, dedicated line, automatic
+profile sharing or plan change is included. See [contract, tests and ordered
+cutover](contact-cards.md). Production rollout follows review and founder approval.
 
 ## Non-Goals
 

@@ -8,6 +8,9 @@ from .messaging.service import Messaging
 from .messaging.runtime import configure_logging
 
 configure_logging()
+cards_enabled = os.environ.get("COMMS_CONTACT_CARDS_ENABLED", "false")
+if cards_enabled not in ("true", "false"):
+    raise ValueError("COMMS_CONTACT_CARDS_ENABLED must be true or false")
 store = Store(os.environ["DATABASE_URL"])
 messaging = Messaging(
     store,
@@ -16,6 +19,7 @@ messaging = Messaging(
     os.environ["COMMS_LINE_E164"],
     os.environ["MESSAGING_ACTIVATED_AT"],
     pilot_conversations=json.loads(os.environ.get("COMMS_PILOT_CONVERSATIONS", "{}")),
+    cards_enabled=cards_enabled == "true",
 )
 print(json.dumps({"database_connection_verified": store.verify_connection()}), flush=True)
 

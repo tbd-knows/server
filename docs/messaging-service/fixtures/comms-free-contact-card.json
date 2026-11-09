@@ -1,0 +1,47 @@
+{
+  "evidence": "Sanitized actual Comms Free Pilot A contact-card response and matching exact-ID history; no usable contacts, native IDs or URLs.",
+  "http_status": 200,
+  "acceptance": {
+    "message": {
+      "id": "fake-card-native",
+      "conversation_id": "conversation_fake_card",
+      "contact_id": "contact_fake_card",
+      "direction": "outbound",
+      "channel": "imessage",
+      "body": "",
+      "status": "sent",
+      "created_at": "2026-11-09T19:52:18.306Z",
+      "line_id": "line_fake_shared",
+      "line_e164": "+12125550100",
+      "attachments": [
+        {
+          "filename": "TBD.vcf",
+          "content_type": "text/vcard",
+          "mediaType": "text/vcard",
+          "size_bytes": 172548,
+          "url": "https://attachments.example.test/fake-card.vcf"
+        }
+      ]
+    },
+    "contact_card": {
+      "name": "TBD",
+      "phone": "+12125550100"
+    }
+  },
+  "history": {
+    "id": "fake-card-native",
+    "conversation_id": "conversation_fake_card",
+    "contact_id": "contact_fake_card",
+    "direction": "outbound",
+    "channel": "imessage",
+    "body": "",
+    "status": "sent",
+    "created_at": "2026-11-09T19:52:18.306Z",
+    "line_id": "line_fake_shared",
+    "line_e164": "+12125550100"
+  },
+  "handset_confirmed": {
+    "one_card_in_original_thread": true,
+    "saved_logo_visible_in_messages": true
+  }
+}

@@ -221,3 +221,11 @@ backlog. Reconcile unexpected eligible backlog explicitly before deployment.
   Allocation16 used/4 reserve is bookkeeping, not a live allowance reading.
   Check actual availability before more tests; reset time and inbound accounting
   remain unverified. Keep both testers paused after the completed pass.
+
+
+## Contact card rollout (pending review)
+
+Keep COMMS_CONTACT_CARDS_ENABLED=false until the reviewed ledger migration and
+private Pilot A import are verified. [contact-cards.md](contact-cards.md) gives the
+exact migration/import/enable/deploy sequence and post-deploy B/A checks. This
+follow-up has not been deployed; it does not change the existing reply settings.

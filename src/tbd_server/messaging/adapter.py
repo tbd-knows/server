@@ -1,7 +1,7 @@
 """Comms by Osis boundary. Wire mappings require Free-account fixture validation."""
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 import hashlib
 import hmac
@@ -22,6 +22,7 @@ class SendResult:
     error_code: str | None = None
     retry_after: float | None = None
     observed_status: str | None = None
+    response_body: str | None = None
 
 
 def signed_event(body: bytes, signature: str, secret: str) -> dict:
@@ -228,3 +229,51 @@ class Comms:
             if isinstance(record, dict) and record.get("id") == job["provider_message_id"]:
                 return self.classify(record, job)
         return SendResult("uncertain", job["provider_message_id"], "history_missing")
+
+    def send_card(self, job):
+        from .cards import identity, payload
+
+        digest, key = identity(job["account_ref"], job["conversation_id"])
+        if digest != job["payload_sha256"] or key != job["idempotency_key"]:
+            return SendResult("failed", error_code="card_payload_changed")
+        try:
+            response = self.request(
+                "POST",
+                "contact-cards",
+                headers={"Idempotency-Key": key, "Content-Type": "application/json"},
+                content=json.dumps(payload(job["account_ref"], job["conversation_id"]), separators=(",", ":")).encode(),
+                # Keep the exact verified payload bytes stable across retry/import.
+            )
+        except httpx.HTTPError:
+            return SendResult("pending", error_code="transport_unknown")
+        if response.status_code == 429:
+            return SendResult("pending", error_code="rate_limited", retry_after=retry_after(response))
+        if response.status_code == 402:
+            return SendResult("pending", error_code="quota", retry_after=3600)
+        if response.status_code in (401, 403):
+            return SendResult("pending", error_code="account_configuration", retry_after=60)
+        try:
+            data = response.json()
+        except ValueError:
+            return SendResult("pending", error_code="invalid_response")
+        if response.status_code in (200, 201, 202) and isinstance(data, dict):
+            card, message = data.get("contact_card"), data.get("message")
+            if (
+                isinstance(card, dict)
+                and card.get("name") == "TBD"
+                and card.get("phone") == job["account_ref"]
+                and isinstance(message, dict)
+                and isinstance(message.get("body"), str)
+                and utf8_size(message["body"]) <= 65536
+            ):
+                # Real cards have an empty body + text/vcard attachment. History
+                # omits that attachment; bind the saved body and exact native ID.
+                result = self.classify(message, {**job, "text": message["body"]})
+                return replace(result, response_body=message["body"] if result.provider_id else None)
+            return SendResult("pending", error_code="invalid_card_response")
+        if response.status_code >= 500:
+            return SendResult("pending", error_code="provider_retry")
+        return SendResult("failed", error_code="request_rejected")
+
+    def card_status(self, job):
+        return replace(self.status({**job, "text": job["response_body"]}), response_body=job["response_body"])
