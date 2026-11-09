@@ -17,6 +17,16 @@ log = logging.getLogger("tbd.messaging")
 LOCK_ID = 843219017
 
 
+def configure_logging():
+    """Own only the Messaging logger; keep provider/root logging unchanged."""
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    log.handlers = [handler]
+    log.setLevel(logging.INFO)
+    log.disabled = False
+    log.propagate = False
+
+
 def emit(event, **fields):
     log.info(json.dumps({"event": event, **fields}, default=str))
 

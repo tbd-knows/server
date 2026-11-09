@@ -112,7 +112,9 @@ invented pagination. Recovery cannot cover messages outside provider retention
 or older messages hidden by the cap. Re-enable a disabled webhook after fixing
 its cause; provider retries and history complement one another.
 
-Logs omit bodies, contacts and provider errors/URLs. Receipt/commit/replay,
+Startup configures only `tbd.messaging` at INFO with structured messages on stderr;
+root/provider logging is not enabled by this configuration. Logs omit bodies,
+contacts and provider errors/URLs. Receipt/commit/replay,
 message/attempt IDs, queue age, API duration and state/error observations correlate
 stages. Acceptance is not sent or delivery. Render Free sleep pauses processing;
 pending rows do not wake it. Measure actual ordinary/burst/interleaved/quiet-wake

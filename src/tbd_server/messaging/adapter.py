@@ -180,16 +180,16 @@ class Comms:
             return SendResult("pending", error_code="transport_unknown")
         if response.status_code == 429:
             return SendResult("pending", error_code="rate_limited", retry_after=retry_after(response))
+        if response.status_code == 402:
+            return SendResult("pending", error_code="quota", retry_after=3600)
+        if response.status_code in (401, 403):
+            return SendResult("pending", error_code="account_configuration", retry_after=60)
         try:
             data = response.json()
         except ValueError:
             return SendResult("pending", error_code="invalid_response")
         if response.status_code in (200, 202):
             return self.classify(data.get("message") if isinstance(data, dict) else None, job)
-        if response.status_code == 402:
-            return SendResult("pending", error_code="quota", retry_after=3600)
-        if response.status_code in (401, 403):
-            return SendResult("pending", error_code="account_configuration", retry_after=60)
         code = data.get("code") or data.get("error") if isinstance(data, dict) else None
         if code in ("line_mismatch", "conversation_line_mismatch", "line_channel_unsupported"):
             return SendResult("pending", error_code="account_configuration", retry_after=60)

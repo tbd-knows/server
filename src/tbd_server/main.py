@@ -5,7 +5,9 @@ from .user.api import create_app
 from .user.auth import Auth
 from .user.store import Store
 from .messaging.service import Messaging
+from .messaging.runtime import configure_logging
 
+configure_logging()
 store = Store(os.environ["DATABASE_URL"])
 messaging = Messaging(
     store,

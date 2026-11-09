@@ -178,3 +178,22 @@ def test_status_matches_exact_id_in_conversation_no_post():
     j["provider_message_id"] = "missing"
     assert adapter.status(j).state == "uncertain"
     adapter.close()
+
+
+@pytest.mark.parametrize("body", [b"", b"<html>Request rejected</html>"])
+@pytest.mark.parametrize(
+    "code,error,delay",
+    [
+        (401, "account_configuration", 60),
+        (403, "account_configuration", 60),
+        (402, "quota", 3600),
+        (429, "rate_limited", 60),
+    ],
+)
+def test_status_based_pause_does_not_require_json(code, error, delay, body):
+    adapter = Comms("fake", transport=httpx.MockTransport(lambda _: httpx.Response(code, content=body)))
+    try:
+        result = adapter.send(job())
+        assert (result.state, result.error_code, result.retry_after) == ("pending", error, delay)
+    finally:
+        adapter.close()

@@ -47,7 +47,7 @@ uv run --locked ruff format --check src tests scripts
 git diff --check
 ```
 
-**135 passed, zero skipped**, disposable local PostgreSQL over TCP and the actual
+**144 passed, zero skipped**, disposable local PostgreSQL over TCP and the actual
 restricted backend role, plus controlled HTTP. One existing Starlette/AnyIO
 warning. Automated tests never contact the live provider or hosted database.
 
@@ -80,3 +80,24 @@ configuration and migration-before-deploy verification remain TBD-20 **after**
 backend review, both founders' explicit merge approvals and merge. No production
 migration, hosting configuration, live provider send or account reset occurred in
 this allowlist implementation.
+
+## Focused review corrections
+
+Messaging startup configures only `tbd.messaging` with an INFO stderr handler and
+JSON-message formatting, without propagation or root/provider logger changes.
+A subprocess loads the real app through the documented Uvicorn logging settings
+(fake configuration, database verification stubbed, no live I/O). Reinitializing
+the logger still emits exactly one sanitized event on stderr:
+
+```json
+{"event": "logging_smoke", "request_id": "fake-request", "state": "pending"}
+```
+
+Comms sends now classify HTTP 401/402/403 before JSON parsing, preserving the
+existing 60-second configuration and 3,600-second quota pauses even for empty or
+non-JSON bodies. Existing 429 parsing/fallback behavior is unchanged. Focused
+empty/HTML tests cover all four status codes. The full disposable PostgreSQL suite
+passes **144 tests, zero skipped**; Ruff/format/whitespace pass. One existing
+upstream warning remains. Both fixes are ready for focused re-review in PR #5;
+TBD-18 stays In Progress. No live provider call, production migration/deployment
+or merge occurred for these corrections.
