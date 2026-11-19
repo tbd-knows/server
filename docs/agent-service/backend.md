@@ -13,7 +13,9 @@ The deployed program reads the existing Messaging line and conversation allowlis
 
 The adapter uses foreground OpenAI Responses requests with `store: false` and a strict schema. Provider abuse-monitoring retention depends on the API project's data controls. Verify the pilot project's settings before real User traffic. [OpenAI data controls](https://developers.openai.com/api/docs/guides/your-data)
 
-Each turn pins the model, prompt and schema revisions, and resource limits. The initial limits are two possible attempts, a ten-second attempt lease, a 24-second admission deadline, 1,200 output tokens, and a 16,000-byte budget for projected inputs, instructions, and schema. The initial timestamp allowance is two seconds and brief inactivity limit is seven days. Tune these with controlled evidence. Drain to Fixed before changing incompatible inference configuration.
+Each turn pins the model, prompt and schema revisions, and resource limits. The initial limits are two possible attempts, a ten-second attempt lease, a 24-second admission deadline, 1,200 output tokens, and a 16,000-byte budget for projected inputs, instructions, and schema. The initial timestamp allowance is two seconds and a brief expires seven days after its last accepted edit. Earlier briefs derive that time from their stored inbound provenance. Tune these with controlled evidence. Drain to Fixed before changing incompatible inference configuration.
+
+Brief constraints require explicit first-party wording such as “My budget is $65” or “I need size 10,” or an eligible answer to a typed question. Listing prices and sizes stay in option entries.
 
 ### Supported preference controls
 

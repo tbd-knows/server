@@ -2396,3 +2396,148 @@ def test_agent_db_unseen_question_cannot_edit_brief(agent_pilot):
     with store.transaction() as cur:
         brief = current_state(cur, users[0]["id"])["brief"]
         assert "size" not in brief["fields"]
+
+
+def test_agent_db_unsupported_edits_and_false_confirmations_keep_existing_brief(agent_pilot):
+    from tbd_server.agent import harness
+    from tbd_server.agent.adapter import Generation
+    from tbd_server.agent.store import current_state
+    from test_agent_harness import generated
+
+    store, _, users, _, runner, event, intake, result = agent_pilot
+    outputs = iter([
+        generated(brief="update", edits=[
+            {"field": "item", "value": "shoes"},
+            {"field": "size", "value": "9"},
+            {"field": "budget", "value": "$72"},
+        ]),
+        generated(brief="update", edits=[{"field": "budget", "value": "$80"}]),
+        generated(brief="update", edits=[{"field": "size", "value": "8"}]),
+        generated(reply="I placed the order for you."),
+    ])
+
+    async def model(*_):
+        return Generation(next(outputs))
+
+    def brief():
+        with store.transaction() as cur:
+            return current_state(cur, users[0]["id"])["brief"]
+
+    runner.adapter = model
+    opening = intake(event("Compare shoes. My size is 9. My budget is $72."))
+    assert runner.step() and result(opening)[0]["outcome"] == "model"
+    before = brief()
+    cases = (
+        ("My budget is $65, but the seller asks $80.", "fallback", harness.CLARIFY_BRIEF),
+        ("The listing is size 8 but I need size 10.", "fallback", harness.CLARIFY_BRIEF),
+        ("Which option fits?", "fallback", harness.FALLBACK),
+        ("Place the order for me.", "transaction", harness.TRANSACTION),
+    )
+    for text, outcome, reply in cases:
+        inbound = intake(event(text))
+        assert runner.step()
+        turn, replies = result(inbound)
+        assert turn["outcome"] == outcome
+        assert len(replies) == 1 and replies[0]["text"] == reply
+        assert brief() == before
+
+
+def test_agent_db_retracted_forget_preserves_memory_and_gift_scope(agent_pilot):
+    import json
+
+    from tbd_server.agent.adapter import Generation
+    from tbd_server.agent.store import current_state
+    from test_agent_harness import generated
+
+    store, _, users, _, runner, event, intake, result = agent_pilot
+    prompts = []
+
+    async def model(_, prompt, *__):
+        prompts.append(json.loads(prompt))
+        if len(prompts) == 1:
+            return Generation(generated(brief="update", edits=[{"field": "item", "value": "shoes"}]))
+        return Generation(generated())
+
+    def get_state():
+        with store.transaction() as cur:
+            return current_state(cur, users[0]["id"])
+
+    runner.adapter = model
+    for text in (
+        "Forget brand for shoes for me",
+        "Remember size for shoes for me is 8",
+        "Compare these shoes",
+    ):
+        intake(event(text))
+        assert runner.step()
+    assert prompts[0]["preferences"][0]["value"] == "8"
+    before = get_state()
+    retracted = intake(event("Forget size for shoes for me; actually, keep that preference"))
+    assert runner.step()
+    turn, replies = result(retracted)
+    assert turn["outcome"] == "control"
+    assert len(replies) == 1 and "confirm" in replies[0]["text"]
+    after = get_state()
+    for field in ("preferences", "brief", "reset_source_at", "reset_sequence"):
+        assert after[field] == before[field]
+    assert len(prompts) == 1
+
+    gift = intake(event("Compare these shoes for a friend"))
+    assert runner.step()
+    assert result(gift)[0]["outcome"] == "model"
+    assert prompts[1]["preferences"] == [] and prompts[1]["brief"] is None
+
+    clear = intake(event("Forget size for shoes for me; compare these shoes"))
+    assert runner.step()
+    assert "resend" in result(clear)[1][0]["text"]
+    after = get_state()
+    assert after["preferences"] == {} and after["brief"] is None
+    assert after["reset_sequence"] == clear["queue_sequence"]
+    assert after["reset_source_at"] == clear["source_at"]
+    assert len(prompts) == 2
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_agent_db_local_watermark_cannot_revive_expired_brief(agent_pilot, legacy):
+    from datetime import timedelta
+    import json
+
+    from psycopg.types.json import Jsonb
+
+    from tbd_server.agent import harness
+    from tbd_server.agent.adapter import Generation
+    from tbd_server.agent.store import current_state
+    from test_agent_harness import generated
+
+    store, _, users, _, runner, event, intake, result = agent_pilot
+    prompts = []
+
+    async def model(_, prompt, *__):
+        prompts.append(json.loads(prompt))
+        if len(prompts) == 1:
+            return Generation(generated(brief="update", edits=[{"field": "item", "value": "shoes"}]))
+        return Generation(generated())
+
+    runner.adapter = model
+    opening = intake(event("Compare shoes"))
+    assert runner.step()
+    expired_at = opening["source_at"] - harness.BRIEF_AGE - timedelta(seconds=1)
+    with store.transaction() as cur:
+        old_brief = current_state(cur, users[0]["id"])["brief"]
+        if legacy:
+            del old_brief["activity_at"]
+        else:
+            old_brief["activity_at"] = expired_at.isoformat()
+        cur.execute("UPDATE agent_service.user_state SET brief=%s WHERE user_id=%s", (Jsonb(old_brief), users[0]["id"]))
+    if legacy:
+        with psycopg.connect(os.environ["TEST_DATABASE_URL"]) as db:
+            db.execute("UPDATE messaging.messages SET source_at=%s WHERE id=%s", (expired_at, opening["id"]))
+
+    inspect = intake(event("Show my preferences"))
+    assert runner.step() and result(inspect)[0]["outcome"] == "control"
+    with store.transaction() as cur:
+        after = current_state(cur, users[0]["id"])
+        assert after["watermark"] == inspect["source_at"] and after["brief"] == old_brief
+    follow_up = intake(event("Can you compare the options again?"))
+    assert runner.step() and result(follow_up)[0]["outcome"] == "model"
+    assert prompts[1]["brief"] is None

@@ -19,7 +19,7 @@ from .store import HEAD, approved, current_state, finish, lock_user, now, route
 def execution_config(model):
     return {
         "model": model,
-        "prompt": 1,
+        "prompt": 2,
         "schema": 1,
         "deadline": 24,
         "lease": 10,
@@ -238,6 +238,8 @@ class AgentRunner:
             try:
                 reply, brief, target = harness.validate(result.output, turn, brief, answer)
                 outcome = "model"
+            except harness.BriefEvidenceError:
+                reply = harness.CLARIFY_BRIEF
             except harness.INVALID_RESULT:
                 pass
         try:
