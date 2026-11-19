@@ -2323,6 +2323,74 @@ def test_commerce_eval_scores_unbound_gift_question():
     assert not commerce_quality("follow_up", "Maple is size 8.", None)["gift_clarification"]
 
 
+def commerce_output_structure(output):
+    from pydantic import ValidationError
+
+    from tbd_server.agent.harness import Result
+
+    if output is None:
+        return None
+    try:
+        result = Result.model_validate_json(output)
+    except ValidationError:
+        return None
+    return {
+        "brief": result.brief,
+        "edit_fields": [edit.field for edit in result.edits],
+        "question_is_null": result.question is None,
+    }
+
+
+def test_commerce_no_fit_budget_only_update_and_reply_only():
+    from tbd_server.agent import harness
+    from test_agent_harness import generated, turn
+
+    inbound = turn(dict(COMMERCE_V1_CASES)["no_fit"])
+    reply = "Neither pair fits your $50 budget."
+    budget_only = generated(reply=reply, brief="update", edits=[{"field": "budget", "value": "$50"}])
+    assert commerce_output_structure(budget_only) == {
+        "brief": "update", "edit_fields": ["budget"], "question_is_null": True,
+    }
+    with pytest.raises(harness.BriefValidationError, match="Incomplete"):
+        harness.validate(budget_only, inbound, None, None)
+
+    reply_only = generated(reply=reply)
+    assert commerce_output_structure(reply_only) == {
+        "brief": "unchanged", "edit_fields": [], "question_is_null": True,
+    }
+    assert harness.validate(reply_only, inbound, None, None) == (reply, None, None)
+    assert commerce_quality("no_fit", reply, None)["no_fit"]
+    assert commerce_output_structure(generated(reply=reply, question={"field": "budget", "value": None})) == {
+        "brief": "unchanged", "edit_fields": [], "question_is_null": False,
+    }
+
+
+def test_commerce_gift_recipient_preserves_authorized_wording_and_scope():
+    from tbd_server.agent import harness
+    from test_agent_harness import generated, turn
+
+    inbound = turn(dict(COMMERCE_V1_CASES)["follow_up"])
+    own = {"id": "personal", "fields": {"item": {"value": "shoes"}, "size": {"value": "8"}}, "options": []}
+    question = {"field": "size", "value": None}
+
+    def replacement(recipient):
+        return generated(brief="replace", edits=[
+            {"field": "item", "value": "shoes"}, {"field": "recipient", "value": recipient},
+        ], question=question)
+
+    with pytest.raises(harness.BriefEvidenceError) as error:
+        harness.validate(replacement("sister"), inbound, own, None)
+    assert error.value.field == "recipient"
+    _, gift, target = harness.validate(replacement("my sister"), inbound, own, None)
+    assert gift["fields"]["recipient"]["value"] == "my sister"
+    assert "size" not in gift["fields"] and target["brief_id"] != own["id"]
+
+    reply, unchanged, target = harness.validate(generated(question=question), inbound, own, None)
+    assert commerce_quality("follow_up", reply, target)["gift_clarification"]
+    assert unchanged == own and own["fields"]["size"]["value"] == "8"
+    assert target is None
+
+
 def test_agent_db_repeated_model_eval(agent_pilot, monkeypatch):
     """Opt-in paid eval on the same real runner and versioned synthetic turns."""
     from collections import Counter
@@ -2345,8 +2413,18 @@ def test_agent_db_repeated_model_eval(agent_pilot, monkeypatch):
 
     store, account, users, pairs, runner, event, _, result = agent_pilot
     runner.config = agent_runtime.execution_config(model)
-    runner.adapter = OpenAI(key)
+    provider = OpenAI(key)
     records = []
+    no_fit_outputs = []
+    label = None
+
+    async def observe(*args):
+        generation = await provider(*args)
+        if label == "no_fit":
+            no_fit_outputs.append(commerce_output_structure(generation.output))
+        return generation
+
+    runner.adapter = observe
     emit = agent_runtime.emit
 
     def collect(name, **fields):
@@ -2366,6 +2444,7 @@ def test_agent_db_repeated_model_eval(agent_pilot, monkeypatch):
     for index in range(repeats):
         for label, body in COMMERCE_V1_CASES:
             records.clear()
+            no_fit_outputs.clear()
             arrived = monotonic()
             with store.transaction() as cur:
                 inbound = receive_message(
@@ -2391,13 +2470,16 @@ def test_agent_db_repeated_model_eval(agent_pilot, monkeypatch):
                 quality = commerce_quality(label, reply, turn["question"])
                 for metric, passed in quality.items():
                     metrics[metric] += passed
-            cases.append({
+            case = {
                 "repeat": index + 1, "case": label, "outcome": outcome, "quality": quality,
                 "fallback_reason": (completion.get("reason") or "unobserved") if outcome == "fallback" else None,
                 "intake_ms": round((start - arrived) * 1000, 2),
                 "turn_ms": round((finished - start) * 1000, 2),
                 "completion": completion, "attempts": attempts,
-            })
+            }
+            if label == "no_fit":
+                case["output_structure"] = list(no_fit_outputs)
+            cases.append(case)
         with store.transaction() as cur:
             saved = current_state(cur, users[0]["id"])["preferences"]
             metrics["privacy_or_state_failures"] += int(saved["shoes|me|condition"]["value"] != "new")
@@ -2693,6 +2775,9 @@ def test_agent_db_observed_gift_question_cannot_change_personal_brief(agent_pilo
     ('{"reply": "I would go with Aspen."}', "schema_validation"),
     ("unsubstantiated_budget", "brief_evidence"),
     ("unexpected_edit", "brief_validation"),
+    ("derived_condition", "brief_evidence"),
+    ("rewritten_option", "brief_evidence"),
+    ("reply_only", None),
     ("valid", None),
 ])
 def test_agent_db_recommendation_diagnostics(agent_pilot, monkeypatch, response, expected):
@@ -2713,11 +2798,15 @@ def test_agent_db_recommendation_diagnostics(agent_pilot, monkeypatch, response,
         "input_tokens": 500, "output_tokens": 82, "total_tokens": 582,
         "input_tokens_details": {"cached_tokens": 0},
     }
+    reply = "I would go with Aspen. It’s new and within your budget."
     model_results = {
+        "derived_condition": generated(reply=reply, brief="update", edits=[{"field": "condition", "value": "new"}]),
+        "rewritten_option": generated(reply=reply, brief="update", edits=[{"field": "option", "value": "Aspen: $80, new"}]),
+        "reply_only": generated(reply=reply),
         "unsubstantiated_budget": generated(brief="update", edits=[{"field": "budget", "value": "$80"}]),
         "unexpected_edit": generated(brief="unchanged", edits=[{"field": "budget", "value": "$90"}]),
         "valid": generated(
-            reply="I would go with Aspen. It’s new and within your budget.", brief="update",
+            reply=reply, brief="update",
             edits=[
                 {"field": "item", "value": "shoes"},
                 {"field": "budget", "value": "$90"},
@@ -2749,17 +2838,25 @@ def test_agent_db_recommendation_diagnostics(agent_pilot, monkeypatch, response,
     assert runner.step()
     turn, replies = result(recommendation)
     assert records["agent_completion"]["reason"] == expected
-    assert records["agent_completion"]["brief_field"] == ("budget" if expected == "brief_evidence" else None)
+    rejected_field = {"unsubstantiated_budget": "budget", "derived_condition": "condition", "rewritten_option": "option"}
+    assert records["agent_completion"]["brief_field"] == (rejected_field.get(response) if isinstance(response, str) else None)
     assert records["agent_inference"]["usage"] == {
         "input_tokens": 500, "output_tokens": 82, "total_tokens": 582, "cached_tokens": 0,
     }
     assert len(payloads) == len(replies) == 1
-    assert payloads[0]["current_constraints"]["budget"] == "$90"
+    assert payloads[0]["current_constraints"] == {"item": "shoes", "recipient": "me", "budget": "$90"}
+    assert payloads[0]["preferences"] == [
+        {"item": "shoes", "recipient": "me", "key": "condition", "value": "new"},
+    ]
     with store.transaction() as cur:
         brief = current_state(cur, users[0]["id"])["brief"]
     if expected is None:
         assert turn["outcome"] == "model"
         assert commerce_quality("recommendation", replies[0]["text"], None)["recommendation"]
-        assert brief["fields"]["budget"]["value"] == "$90"
+        if response == "reply_only":
+            assert brief is None
+        else:
+            assert brief["fields"]["budget"]["value"] == "$90"
+            assert brief["options"][0]["value"] == "Aspen is new for $80"
     else:
         assert turn["outcome"] == "fallback" and brief is None
