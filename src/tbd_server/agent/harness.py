@@ -405,8 +405,16 @@ def scope_mentioned(scope, text):
     return re.search(r"(?<!\w)" + re.escape(scope) + r"(?!\w)", text) is not None
 
 
-class BriefEvidenceError(ValueError):
+class BriefValidationError(ValueError):
+    """A proposed change or question violates the brief contract."""
+
+
+class BriefEvidenceError(BriefValidationError):
     """A proposed brief edit lacks authority from the current User turn."""
+
+    def __init__(self, message, field=None):
+        super().__init__(message)
+        self.field = field
 
 
 def validate(raw, turn, brief, answer):
@@ -419,19 +427,20 @@ def validate(raw, turn, brief, answer):
         not reply
         or len(reply) > 4800
         or SECRET.search(reply)
-        or len(result.edits) > 12
         or FALSE_CONFIRMATION.search(reply)
         or re.search(r"\b(?:send|share|provide|enter|tell me)\b.{0,60}\b(?:card|password|cvv|pin|code)\b", reply, re.I)
     ):
         raise ValueError("Invalid reply")
     utf8_size(reply)
+    if len(result.edits) > 12:
+        raise BriefValidationError("Too many edits")
     if result.brief in ("unchanged", "close") and result.edits:
-        raise ValueError("Unexpected edits")
+        raise BriefValidationError("Unexpected edits")
     if result.brief == "close":
         if not re.fullmatch(
             r"(?:close|clear|finish|cancel)(?: (?:this|the|my))? (?:shopping )?brief[.!]?", text.strip(), re.I
         ):
-            raise ValueError("Missing close evidence")
+            raise BriefValidationError("Missing close evidence")
         brief = None
     if result.brief in ("update", "replace"):
         if (
@@ -445,7 +454,7 @@ def validate(raw, turn, brief, answer):
                 re.I,
             )
         ):
-            raise ValueError("Missing switch evidence")
+            raise BriefValidationError("Missing switch evidence")
         recipient = constraints.get("recipient")
         if brief and result.brief == "update" and not existing_brief_eligible:
             raise BriefEvidenceError("The current request cannot edit this brief")
@@ -462,7 +471,7 @@ def validate(raw, turn, brief, answer):
         for edit in result.edits:
             value = edit.value.strip()
             if not 0 < len(value) <= 160 or SECRET.search(value):
-                raise ValueError("Invalid edit value")
+                raise BriefValidationError("Invalid edit value")
             if edit.field == "option":
                 allowed = scope_mentioned(value.casefold(), text.casefold())
             else:
@@ -472,7 +481,7 @@ def validate(raw, turn, brief, answer):
                     if candidate is not None
                 }
             if not allowed:
-                raise BriefEvidenceError("Missing edit evidence")
+                raise BriefEvidenceError("Missing edit evidence", edit.field)
             utf8_size(value)
             evidence = {"value": value, "source": str(turn["id"])}
             if edit.field == "option":
@@ -480,27 +489,27 @@ def validate(raw, turn, brief, answer):
                     brief["options"].append(evidence)
             else:
                 if edit.field in seen:
-                    raise ValueError("Duplicate field")
+                    raise BriefValidationError("Duplicate field")
                 if (
                     edit.field in ("item", "recipient")
                     and edit.field in brief["fields"]
                     and brief["fields"][edit.field]["value"].casefold() != value.casefold()
                 ):
-                    raise ValueError("Use a replacement for a different item or recipient")
+                    raise BriefValidationError("Use a replacement for a different item or recipient")
                 brief["fields"][edit.field] = evidence
                 seen.add(edit.field)
         if recipient:
             stored_recipient = brief["fields"].get("recipient", {}).get("value", "me")
             if recipient_scope(stored_recipient) != recipient_scope(recipient):
-                raise BriefEvidenceError("Missing recipient evidence in brief")
+                raise BriefEvidenceError("Missing recipient evidence in brief", "recipient")
         if result.edits:
             brief["activity_at"] = turn["source_at"].isoformat()
         if "item" not in brief["fields"] or len(brief["options"]) > 8:
-            raise ValueError("Incomplete or oversized brief")
+            raise BriefValidationError("Incomplete or oversized brief")
     target = None
     if result.question:
         if "?" in reply:
-            raise ValueError("Ambiguous question")
+            raise BriefValidationError("Ambiguous question")
         field, value = result.question.field, result.question.value
         if result.brief == "unchanged" and not existing_brief_eligible:
             # The app can ask for a detail without making a short answer
@@ -511,9 +520,9 @@ def validate(raw, turn, brief, answer):
                 None,
             )
         if not brief:
-            raise ValueError("A question target requires a brief")
+            raise BriefValidationError("A question target requires a brief")
         if value is not None and value != brief["fields"].get(field, {}).get("value"):
-            raise ValueError("Unsupported question target")
+            raise BriefValidationError("Unsupported question target")
         target = {"brief_id": brief["id"], "field": field, "value": value}
         label = "recipient" if field == "recipient" else field
         reply += f"\n\nIs {value} the right {label}?" if value is not None else f"\n\nWhat {label} should I use?"

@@ -66,3 +66,5 @@ TBD_RUN_AGENT_EVAL=1 uv run --locked python scripts/run_database_tests.py -q -s 
 ```
 
 The eval outputs recommendation, material question and preference reuse counts, privacy and state errors, attempt timings and known usage. Agent logs correlate queue, context, inference, and commit timings. Missing usage stays null. Reconcile possibly billed dispatches without usage with provider billing before reporting cost per useful reply.
+
+The report includes the exact Git SHA and a row per case and repeat with its outcome, fallback reason, and attempt timings. It scores a useful gift size clarification separately from a saved question target. For the approved GPT-5.4 mini snapshot, the report estimates known spend using standard list rates. Spend per useful reply is calculated only when every attempt has priceable usage, and counts useful recommendations, correct no-fit replies, and useful gift clarifications. Reconcile the estimate with billed usage. [OpenAI model rates](https://developers.openai.com/api/docs/models/gpt-5.4-mini)

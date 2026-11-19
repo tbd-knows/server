@@ -7,6 +7,7 @@ from time import monotonic
 from uuid import uuid4
 
 import psycopg
+from pydantic import ValidationError
 from psycopg.rows import dict_row
 
 from tbd_server.messaging.runtime import emit
@@ -108,7 +109,7 @@ class AgentRunner:
                 return False
             if turn["granted_at"] is not None:
                 emit("agent_recovered_grant", inbound_id=turn["id"], attempt_id=turn["agent_attempt"])
-            settled = self.local(cur, turn, state, at)
+            settled, reason = self.local(cur, turn, state, at)
             if not settled:
                 token = uuid4()
                 cur.execute(
@@ -122,6 +123,7 @@ class AgentRunner:
                 "agent_local_completion",
                 inbound_id=turn["id"],
                 outcome=settled,
+                reason=reason,
                 queue_ms=round((at - turn["created_at"]).total_seconds() * 1000, 2),
                 completion_ms=round((monotonic() - started) * 1000, 2),
             )
@@ -155,8 +157,10 @@ class AgentRunner:
 
         try:
             result = asyncio.run(bounded())
+        except TimeoutError:
+            result = Generation(retryable=True, reason="provider_timeout")
         except Exception:
-            result = Generation(retryable=True)
+            result = Generation(retryable=True, reason="adapter_error")
         inferred = monotonic()
         emit(
             "agent_inference",
@@ -168,6 +172,7 @@ class AgentRunner:
             context_ms=round((granted - context_started) * 1000, 2),
             inference_ms=round((inferred - inference_started) * 1000, 2),
             usage=result.usage,
+            reason=result.reason,
         )
         self.complete(turn, token, result, brief, answer)
         return True
@@ -192,11 +197,13 @@ class AgentRunner:
     def local(self, cur, turn, state, at):
         text = turn["text"]
         fresh = harness.fresh(turn, state)
+        reason = None
         if harness.SECRET.search(text):
             outcome, reply = "blocked", harness.SENSITIVE
         elif not fresh:
             outcome, reply = "stale", harness.RESTATEMENT
         elif state["mode"] == "fallback":
+            reason = "operator_fallback"
             control = harness.memory_control(
                 text,
                 {
@@ -217,31 +224,40 @@ class AgentRunner:
             outcome, reply = "control", control
         elif harness.ACTION.search(text.strip()):
             outcome, reply = "transaction", harness.TRANSACTION
-        elif (
-            at >= turn["inference_deadline"]
-            or not turn["attempts_left"]
-            or not self.adapter
-            or turn["execution_config"] != self.config
-        ):
-            outcome, reply = "fallback", harness.FALLBACK
         else:
-            return None
+            if at >= turn["inference_deadline"]:
+                reason = "inference_deadline"
+            elif not turn["attempts_left"]:
+                reason = "attempts_exhausted"
+            elif not self.adapter or turn["execution_config"] != self.config:
+                reason = "inference_unavailable"
+            else:
+                return None, None
+            outcome, reply = "fallback", harness.FALLBACK
         finish(cur, turn, state, outcome, reply, fresh=fresh)
-        return outcome
+        return outcome, reason
 
     def complete(self, turn, token, result, brief, answer, *, local=False):
         started = monotonic()
         outcome = "fallback"
         reply = harness.RESTATEMENT if local else harness.FALLBACK
         target = None
+        brief_field = None
+        reason = "context_restatement" if local else result.reason or "provider_unreadable"
         if result.output is not None:
             try:
                 reply, brief, target = harness.validate(result.output, turn, brief, answer)
-                outcome = "model"
-            except harness.BriefEvidenceError:
+                outcome, reason = "model", None
+            except ValidationError as exc:
+                errors = exc.errors(include_input=False, include_context=False, include_url=False)
+                reason = "output_invalid_json" if errors[0]["type"] == "json_invalid" else "schema_validation"
+            except harness.BriefEvidenceError as exc:
+                reason, brief_field = "brief_evidence", exc.field
                 reply = harness.CLARIFY_BRIEF
+            except harness.BriefValidationError:
+                reason = "brief_validation"
             except harness.INVALID_RESULT:
-                pass
+                reason = "reply_validation"
         try:
             with self.transaction() as cur:
                 user, state, head, at = self.read_head(cur, turn["user_id"])
@@ -270,6 +286,8 @@ class AgentRunner:
             inbound_id=turn["id"],
             attempt_id=token,
             outcome=outcome,
+            reason=reason,
+            brief_field=brief_field,
             commit_ms=round((monotonic() - started) * 1000, 2),
         )
         return True

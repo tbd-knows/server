@@ -2281,16 +2281,60 @@ def test_agent_db_hung_inference_does_not_stall_join_webhook_or_delivery(agent_p
             transition(cur, users[0]["id"], "fixed", account, pairs)
 
 
-def test_agent_db_repeated_model_eval(agent_pilot):
-    """Opt-in paid eval on the same real runner and versioned synthetic turns."""
-    import json
+COMMERCE_V1_CASES = (
+    ("saved", "Remember condition for shoes for me is new"),
+    ("recommendation", "Compare shoes for me: Aspen is new for $80, Birch is used for $70. My budget is $90."),
+    ("preference_reuse", "Between the same two shoes above, which fits my saved condition preference?"),
+    ("no_fit", "My new maximum budget is $50. Does either of those same shoes fit?"),
+    ("follow_up", "Switch to a gift of shoes for my sister. Maple is size 8. Oak is size 10. Which fits?"),
+    ("blocked", "CVV: 123. Remember condition for shoes for me is used"),
+)
+
+
+def commerce_quality(label, reply, question):
     import re
+
+    if label == "no_fit":
+        return {"no_fit": bool(re.search(r"\b(?:neither|none|both.{0,40}(?:over|exceed))\b", reply, re.I))}
+    if label == "follow_up":
+        asks_size = re.search(
+            r"\b(?:what|which|do you know|can you share|could you tell me)\b[^?.!]*\bsize\b[^?.!]*\?",
+            reply, re.I,
+        )
+        return {
+            "gift_clarification": bool(asks_size),
+            "gift_stateful_question": bool(question and question["field"] == "size"),
+        }
+    selects_aspen = re.search(
+        r"(?:choose|recommend|pick|go with|select)\b.{0,36}\bAspen\b|"
+        r"\bAspen\b.{0,50}\b(?:fits|best|recommend|better|choice|pick)\b", reply, re.I,
+    )
+    return {label: bool(selects_aspen) and (label != "preference_reuse" or "new" in reply.lower())}
+
+
+def test_commerce_eval_scores_unbound_gift_question():
+    reply = "What size should I use for this request? Please include the item and who it’s for."
+    assert commerce_quality("follow_up", reply, None) == {
+        "gift_clarification": True, "gift_stateful_question": False,
+    }
+    assert commerce_quality("follow_up", reply, {"field": "size"}) == {
+        "gift_clarification": True, "gift_stateful_question": True,
+    }
+    assert not commerce_quality("follow_up", "Maple is size 8.", None)["gift_clarification"]
+
+
+def test_agent_db_repeated_model_eval(agent_pilot, monkeypatch):
+    """Opt-in paid eval on the same real runner and versioned synthetic turns."""
+    from collections import Counter
+    from decimal import Decimal
+    import json
     from statistics import mean
+    import subprocess
     from time import monotonic
 
+    from tbd_server.agent import runner as agent_runtime
     from tbd_server.agent.adapter import OpenAI
     from tbd_server.agent.harness import SECRET
-    from tbd_server.agent.runner import execution_config
     from tbd_server.agent.store import current_state, transition
     from tbd_server.messaging.core import receive_message
 
@@ -2300,56 +2344,60 @@ def test_agent_db_repeated_model_eval(agent_pilot):
         pytest.skip("TBD_RUN_AGENT_EVAL=1 and TBD-approved model and credentials required")
 
     store, account, users, pairs, runner, event, _, result = agent_pilot
-    runner.config = execution_config(model)
-    provider = OpenAI(key)
-    calls, durations = [], []
+    runner.config = agent_runtime.execution_config(model)
+    runner.adapter = OpenAI(key)
+    records = []
+    emit = agent_runtime.emit
 
-    async def timed(*args):
-        start = monotonic()
-        generation = await provider(*args)
-        calls.append({"ms": round((monotonic() - start) * 1000, 2), "usage": generation.usage})
-        return generation
+    def collect(name, **fields):
+        if name in ("agent_inference", "agent_completion", "agent_local_completion"):
+            records.append({
+                "event": name,
+                **{k: v for k, v in fields.items() if k.endswith("_ms") or k in ("reason", "usage", "brief_field")},
+            })
+        emit(name, **fields)
 
-    runner.adapter = timed
-    metrics = dict(recommendation=0, follow_up=0, preference_reuse=0, no_fit=0, privacy_or_state_failures=0)
+    monkeypatch.setattr(agent_runtime, "emit", collect)
+
+    metrics = dict(recommendation=0, preference_reuse=0, no_fit=0, gift_clarification=0,
+                   gift_stateful_question=0, privacy_or_state_failures=0)
+    cases = []
     repeats = 3
     for index in range(repeats):
-        cases = (
-            ("saved", "Remember condition for shoes for me is new"),
-            ("recommendation", "Compare shoes for me: Aspen is new for $80, Birch is used for $70. My budget is $90."),
-            ("preference_reuse", "Between the same two shoes above, which fits my saved condition preference?"),
-            ("no_fit", "My new maximum budget is $50. Does either of those same shoes fit?"),
-            ("follow_up", "Switch to a gift of shoes for my sister. Maple is size 8. Oak is size 10. Which fits?"),
-            ("blocked", "CVV: 123. Remember condition for shoes for me is used"),
-        )
-        for label, text in cases:
+        for label, body in COMMERCE_V1_CASES:
+            records.clear()
+            arrived = monotonic()
             with store.transaction() as cur:
-                msg = receive_message(
-                    cur, event(text), current_state(cur, users[0]["id"])["enrolled_at"], agent_config=runner.config,
+                inbound = receive_message(
+                    cur, event(body), current_state(cur, users[0]["id"])["enrolled_at"], agent_config=runner.config,
                 )
-            before, start = len(calls), monotonic()
-            while result(msg)[0]["outcome"] is None:
+            start = monotonic()
+            while result(inbound)[0]["outcome"] is None:
                 runner.step()
                 assert monotonic() - start < 30
-            durations.append(round((monotonic() - start) * 1000, 2))
-            turn, replies = result(msg)
+            finished = monotonic()
+            turn, replies = result(inbound)
             assert len(replies) == 1
+            outcome = turn["outcome"]
             reply = replies[0]["text"]
+            attempts = [r for r in records if r["event"] == "agent_inference"]
+            completion = next((r for r in reversed(records) if r["event"] != "agent_inference"), {})
+            quality = {}
             if label in ("saved", "blocked"):
                 expected = "control" if label == "saved" else "blocked"
-                if turn["outcome"] != expected or len(calls) != before or SECRET.search(reply):
+                if outcome != expected or attempts or SECRET.search(reply):
                     metrics["privacy_or_state_failures"] += 1
-            elif turn["outcome"] == "model":
-                if label == "no_fit":
-                    metrics[label] += int(bool(re.search(r"\b(?:neither|none|both.{0,40}(?:over|exceed))\b", reply, re.I)))
-                elif label == "follow_up":
-                    metrics[label] += int(bool(turn["question"] and turn["question"]["field"] == "size"))
-                else:
-                    selects_aspen = re.search(
-                        r"(?:choose|recommend|pick|go with|select)\b.{0,36}\bAspen\b|"
-                        r"\bAspen\b.{0,50}\b(?:fits|best|recommend|better|choice|pick)\b", reply, re.I,
-                    )
-                    metrics[label] += int(bool(selects_aspen) and (label != "preference_reuse" or "new" in reply.lower()))
+            elif outcome == "model":
+                quality = commerce_quality(label, reply, turn["question"])
+                for metric, passed in quality.items():
+                    metrics[metric] += passed
+            cases.append({
+                "repeat": index + 1, "case": label, "outcome": outcome, "quality": quality,
+                "fallback_reason": (completion.get("reason") or "unobserved") if outcome == "fallback" else None,
+                "intake_ms": round((start - arrived) * 1000, 2),
+                "turn_ms": round((finished - start) * 1000, 2),
+                "completion": completion, "attempts": attempts,
+            })
         with store.transaction() as cur:
             saved = current_state(cur, users[0]["id"])["preferences"]
             metrics["privacy_or_state_failures"] += int(saved["shoes|me|condition"]["value"] != "new")
@@ -2357,11 +2405,42 @@ def test_agent_db_repeated_model_eval(agent_pilot):
                 transition(cur, users[0]["id"], "fallback", account, pairs)
                 transition(cur, users[0]["id"], "fixed", account, pairs)
                 transition(cur, users[0]["id"], "agent", account, pairs, "agent_a")
+    attempts = [a for case in cases for a in case["attempts"]]
+    usage = [a["usage"] for a in attempts if a["usage"] is not None]
+    useful_recommendations = metrics["recommendation"] + metrics["preference_reuse"]
+    useful_replies = useful_recommendations + metrics["no_fit"] + metrics["gift_clarification"]
+    spend = None
+    if model == "gpt-5.4-mini-2026-03-17":
+        # Standard list rates for the approved snapshot. Actual billed spend
+        # depends on the account. Incomplete usage leaves spend unreconciled.
+        priced = [
+            u for u in usage if {"input_tokens", "cached_tokens", "output_tokens"} <= u.keys()
+            and u["cached_tokens"] <= u["input_tokens"]
+        ]
+        known_cost = sum((
+            Decimal("0.75") * (u["input_tokens"] - u["cached_tokens"])
+            + Decimal("0.075") * u["cached_tokens"] + Decimal("4.50") * u["output_tokens"]
+            for u in priced
+        ), Decimal(0)) / 1_000_000
+        complete = len(priced) == len(attempts)
+        spend = {
+            "known_estimate_usd": float(known_cost) if priced else None,
+            "unpriced_attempts": len(attempts) - len(priced),
+            "estimate_per_useful_reply_usd": float(known_cost / useful_replies) if complete and useful_replies else None,
+        }
     print(json.dumps({
-        "suite": "commerce-v1", "model": model, "repeats": repeats, "scores": metrics,
-        "useful_recommendation_rate": round((metrics["recommendation"] + metrics["preference_reuse"]) / (2 * repeats), 3),
-        "avg_turn_ms": round(mean(durations), 2), "attempts": calls,
-        "missing_usage_attempts": sum(attempt["usage"] is None for attempt in calls),
+        "suite": "commerce-v1", "model": model, "repeats": repeats,
+        "sha": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+        "scores": metrics, "cases": cases, "useful_replies": useful_replies,
+        "useful_recommendation_rate": round(useful_recommendations / (2 * repeats), 3),
+        "avg_turn_ms": round(mean(case["turn_ms"] for case in cases), 2),
+        "fallback_reasons": dict(Counter(case["fallback_reason"] for case in cases if case["fallback_reason"])),
+        "attempt_count": len(attempts), "missing_usage_attempts": len(attempts) - len(usage),
+        "usage": {
+            key: sum(reported) if (reported := [u[key] for u in usage if key in u]) else None
+            for key in ("input_tokens", "cached_tokens", "output_tokens", "total_tokens")
+        },
+        "spend": spend,
     }))
     assert not metrics["privacy_or_state_failures"]
 
@@ -2605,3 +2684,82 @@ def test_agent_db_observed_gift_question_cannot_change_personal_brief(agent_pilo
     assert result(gift)[0]["question"] is None
     assert result(answer)[1][0]["text"] == harness.RESTATEMENT
     assert len(prompts) == 2
+
+
+@pytest.mark.parametrize("response,expected", [
+    ({"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}, "provider_incomplete_max_output_tokens"),
+    ({"status": "completed", "output": None}, "provider_unreadable"),
+    ("{", "output_invalid_json"),
+    ('{"reply": "I would go with Aspen."}', "schema_validation"),
+    ("unsubstantiated_budget", "brief_evidence"),
+    ("unexpected_edit", "brief_validation"),
+    ("valid", None),
+])
+def test_agent_db_recommendation_diagnostics(agent_pilot, monkeypatch, response, expected):
+    import json
+
+    import httpx
+
+    from tbd_server.agent import runner as agent_runtime
+    from tbd_server.agent.adapter import OpenAI
+    from tbd_server.agent.store import current_state
+    from test_agent_harness import generated
+
+    store, _, users, _, runner, event, intake, result = agent_pilot
+    records = {}
+    payloads = []
+    real_client = httpx.AsyncClient
+    usage = {
+        "input_tokens": 500, "output_tokens": 82, "total_tokens": 582,
+        "input_tokens_details": {"cached_tokens": 0},
+    }
+    model_results = {
+        "unsubstantiated_budget": generated(brief="update", edits=[{"field": "budget", "value": "$80"}]),
+        "unexpected_edit": generated(brief="unchanged", edits=[{"field": "budget", "value": "$90"}]),
+        "valid": generated(
+            reply="I would go with Aspen. It’s new and within your budget.", brief="update",
+            edits=[
+                {"field": "item", "value": "shoes"},
+                {"field": "budget", "value": "$90"},
+                {"field": "option", "value": "Aspen is new for $80"},
+            ],
+        ),
+    }
+
+    def provider(request):
+        payloads.append(json.loads(json.loads(request.content)["input"]))
+        if isinstance(response, dict):
+            envelope = {**response, "usage": usage}
+        else:
+            envelope = {
+                "status": "completed", "usage": usage,
+                "output": [{"type": "message", "content": [
+                    {"type": "output_text", "text": model_results.get(response, response)},
+                ]}],
+            }
+        return httpx.Response(200, json=envelope)
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_: real_client(transport=httpx.MockTransport(provider)))
+    monkeypatch.setattr(agent_runtime, "emit", lambda name, **fields: records.update({name: fields}))
+    runner.adapter = OpenAI("synthetic")
+
+    saved = intake(event(COMMERCE_V1_CASES[0][1]))
+    assert runner.step() and result(saved)[0]["outcome"] == "control"
+    recommendation = intake(event(COMMERCE_V1_CASES[1][1]))
+    assert runner.step()
+    turn, replies = result(recommendation)
+    assert records["agent_completion"]["reason"] == expected
+    assert records["agent_completion"]["brief_field"] == ("budget" if expected == "brief_evidence" else None)
+    assert records["agent_inference"]["usage"] == {
+        "input_tokens": 500, "output_tokens": 82, "total_tokens": 582, "cached_tokens": 0,
+    }
+    assert len(payloads) == len(replies) == 1
+    assert payloads[0]["current_constraints"]["budget"] == "$90"
+    with store.transaction() as cur:
+        brief = current_state(cur, users[0]["id"])["brief"]
+    if expected is None:
+        assert turn["outcome"] == "model"
+        assert commerce_quality("recommendation", replies[0]["text"], None)["recommendation"]
+        assert brief["fields"]["budget"]["value"] == "$90"
+    else:
+        assert turn["outcome"] == "fallback" and brief is None
