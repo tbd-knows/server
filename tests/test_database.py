@@ -1924,3 +1924,475 @@ def test_card_prerequisites_never_prevent_app_start_or_b_replies(card_thread, im
     finally:
         with psycopg.connect(os.environ["TEST_DATABASE_URL"]) as db:
             db.execute("DELETE FROM messaging.contact_cards WHERE user_id=%s", (user["id"],))
+
+
+agent_pilot_numbers = count(0)
+
+
+@pytest.fixture
+def agent_pilot(store):
+    from datetime import datetime, timedelta, timezone
+
+    from tbd_server.agent.runner import AgentRunner, execution_config
+    from tbd_server.agent.store import transition
+    from tbd_server.messaging.core import ReceivedMessage, receive_message
+
+    index = next(agent_pilot_numbers)
+    account = f"+12125556{index:03d}"
+    config = execution_config("synthetic-model")
+    users = []
+    for suffix in (index * 2, index * 2 + 1):
+        phone = f"+12125557{suffix:03d}"
+        identity, email = messaging_invitation(store, phone)
+        users.append(store.join(identity, email))
+    # Use a fixture-specific account so unrelated Messaging tests cannot claim
+    # these delivery jobs even when the tests are shuffled.
+    pairs = {"agent_a": users[0]["phone"], "agent_b": users[1]["phone"], "fixed_a": users[0]["phone"]}
+    with store.transaction() as cur:
+        for user, conversation in zip(users, ("agent_a", "agent_b")):
+            transition(cur, user["id"], "agent", account, pairs, conversation)
+
+    def event(text, conversation="agent_a", at=None):
+        return ReceivedMessage(
+            str(uuid4()), account, pairs[conversation], text, False, at or datetime.now(timezone.utc), conversation,
+        )
+
+    def intake(inbound):
+        with store.transaction() as cur:
+            return receive_message(cur, inbound, datetime.now(timezone.utc) - timedelta(days=1), agent_config=config)
+
+    def result(inbound):
+        with store.transaction() as cur:
+            turn = cur.execute("SELECT * FROM agent_service.turns WHERE inbound_id=%s", (inbound["id"],)).fetchone()
+            replies = cur.execute(
+                "SELECT * FROM messaging.messages WHERE reply_to_message_id=%s", (inbound["id"],)
+            ).fetchall()
+            return turn, replies
+
+    return store, account, users, pairs, AgentRunner(store.database_url, account, pairs, config), event, intake, result
+
+
+def test_agent_db_duplicate_scope_isolation_and_local_controls(agent_pilot):
+    from datetime import datetime, timedelta, timezone
+    import json
+
+    from tbd_server.agent.adapter import Generation
+    from tbd_server.agent.store import current_state
+    from test_agent_harness import generated
+
+    store, _, users, _, runner, event, intake, result = agent_pilot
+    calls = []
+
+    async def model(model_id, prompt, *_):
+        calls.append(json.loads(prompt))
+        return Generation(generated(), {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+
+    runner.adapter = model
+    secret = intake(event("Password: synthetic-secret"))
+    saved = intake(event("Remember size for shoes for me is 8 wide"))
+    fixed = intake(event("Compare shoes", "fixed_a"))
+    comparison = event("Compare these shoes for me")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        a, b = pool.map(intake, [comparison, comparison])
+    comparison_b = intake(event("Compare these shoes for me", "agent_b"))
+    assert a["id"] == b["id"]
+    assert result(a)[1] == []
+    assert result(fixed)[0] is None and len(result(fixed)[1]) == 1
+    for _ in range(4):
+        assert runner.step()
+    assert [result(row)[0]["outcome"] for row in (secret, saved, a, comparison_b)] == [
+        "blocked", "control", "model", "model",
+    ]
+    assert len(result(a)[1]) == 1
+    assert len(calls) == 2
+    assert calls[0]["preferences"][0]["value"] == "8 wide" and calls[1]["preferences"] == []
+    assert "synthetic-secret" not in json.dumps(calls)
+    late = intake(event("Stale comparison", at=a["source_at"] - timedelta(microseconds=1)))
+    assert runner.step()
+    assert result(late)[0]["outcome"] == "stale"
+    forget = intake(event("Forget brand for coats for me; compare these coats", at=datetime.now(timezone.utc)))
+    with store.transaction() as cur:
+        cur.execute(
+            "UPDATE agent_service.turns SET inference_deadline=clock_timestamp()-interval '1s' WHERE inbound_id=%s",
+            (forget["id"],),
+        )
+    assert runner.step()
+    assert result(forget)[0]["outcome"] == "control"
+    assert "resend" in result(forget)[1][0]["text"]
+    with store.transaction() as cur:
+        active = current_state(cur, users[0]["id"])
+        assert active["reset_sequence"] == forget["queue_sequence"]
+        assert active["reset_source_at"] == forget["source_at"]
+        assert active["brief"] is None
+
+
+def test_agent_db_lock_wait_reads_new_mode_and_replays_original_producer(agent_pilot):
+    from threading import Event
+    from time import monotonic, sleep
+
+    from tbd_server.agent.store import lock_user, transition
+
+    store, account, users, pairs, runner, event, intake, result = agent_pilot
+    previous_event = event("Compare shoes")
+    previous = intake(previous_event)
+    assert runner.step()
+    started = Event()
+
+    def wait_for_user():
+        started.set()
+        return intake(new_event)
+
+    new_event = event("Compare jackets")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with store.transaction() as cur:
+            lock_user(cur, users[0]["id"])
+            pending = pool.submit(wait_for_user)
+            assert started.wait(1)
+            deadline = monotonic() + 3
+            while True:
+                cur.execute("SELECT pg_stat_clear_snapshot()")
+                if cur.execute(
+                    """SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock'
+                    AND query LIKE 'SELECT u.* FROM user_service.users u WHERE u.phone=%%'"""
+                ).fetchone():
+                    break
+                assert monotonic() < deadline, "Intake did not wait on the canonical User lock"
+                sleep(0.01)
+            transition(cur, users[0]["id"], "fallback", account, pairs)
+            transition(cur, users[0]["id"], "fixed", account, pairs)
+        fixed = pending.result(timeout=3)
+    assert result(fixed)[0] is None
+    assert result(fixed)[1][0]["text"] == "Received your text."
+    assert intake(previous_event)["replayed"]
+    assert result(previous)[0]["outcome"] == "fallback"
+    assert len(result(previous)[1]) == 1
+
+
+def test_agent_db_expired_grant_and_uncertain_commit(agent_pilot):
+    from contextlib import contextmanager
+
+    from tbd_server.agent.adapter import Generation
+    from test_agent_harness import generated
+
+    store, _, _, _, runner, event, intake, result = agent_pilot
+    inbound = intake(event("Compare these shoes"))
+    calls = []
+
+    async def expire(*_):
+        calls.append("attempt")
+        with store.transaction() as cur:
+            cur.execute(
+                """UPDATE agent_service.turns SET inference_deadline=clock_timestamp()-interval '1s',
+                lease_until=clock_timestamp()-interval '1s' WHERE inbound_id=%s""",
+                (inbound["id"],),
+            )
+        return Generation(generated())
+
+    runner.adapter = expire
+    assert runner.step()
+    assert result(inbound)[1] == []
+    assert runner.step()
+    assert result(inbound)[0]["outcome"] == "fallback"
+    assert calls == ["attempt"]
+
+    second = intake(event("Compare these jackets"))
+    transaction = runner.transaction
+    committed = False
+
+    @contextmanager
+    def uncertain():
+        nonlocal committed
+        with transaction() as cur:
+            yield cur
+        if not committed and result(second)[0]["outcome"] == "model":
+            committed = True
+            raise psycopg.OperationalError("synthetic lost commit response")
+
+    async def model(*_):
+        calls.append("second")
+        runner.transaction = uncertain
+        return Generation(generated())
+
+    runner.adapter = model
+    assert runner.step()
+    assert committed and result(second)[0]["outcome"] == "model"
+    assert len(result(second)[1]) == 1
+    assert not runner.step()
+    assert calls == ["attempt", "second"]
+
+
+def test_agent_db_delivery_revokes_during_backoff_and_preserves_late_evidence(agent_pilot):
+    from tbd_server.agent.delivery import authorize_post, suppress_revoked
+    from tbd_server.messaging.adapter import SendResult
+    from tbd_server.messaging.runtime import claim, record_send_result
+
+    store, account, _, pairs, runner, event, intake, result = agent_pilot
+    first = intake(event("Compare these shoes"))
+    delayed = intake(event("Compare these jackets", "agent_b"))
+    assert runner.step() and runner.step()
+    with store.transaction() as cur:
+        sending = claim(cur, account)
+    assert sending["reply_to_message_id"] == first["id"]
+    with store.transaction() as cur:
+        assert authorize_post(cur, sending, account, pairs)
+        cur.execute(
+            """UPDATE messaging.messages SET next_action_at=clock_timestamp()+interval '1h',error_code='quota'
+            WHERE reply_to_message_id=%s""",
+            (delayed["id"],),
+        )
+    with store.transaction() as cur:
+        suppress_revoked(cur, account, {})
+    assert result(first)[1][0]["state"] == "uncertain"
+    assert result(delayed)[1][0]["state"] == "failed"
+    assert result(delayed)[1][0]["error_code"] == "quota"
+    with store.transaction() as cur:
+        assert authorize_post(cur, sending, account, pairs) is None
+        assert record_send_result(
+            cur, sending["id"], sending["attempt_id"], SendResult("sent", "synthetic-exact-id", observed_status="sent"),
+            agent_guard=True,
+        )
+    assert result(first)[1][0]["state"] == "sent"
+
+
+def test_agent_db_claim_expiry_and_guarded_drain(agent_pilot):
+    from tbd_server.agent.delivery import authorize_post
+    from tbd_server.agent.store import transition
+    from tbd_server.messaging.runtime import claim
+
+    store, account, users, pairs, runner, event, intake, result = agent_pilot
+    inbound = intake(event("Compare these shoes"))
+    with pytest.raises(Problem, match="backlog"):
+        with store.transaction() as cur:
+            transition(cur, users[0]["id"], "fallback", account, pairs)
+            transition(cur, users[0]["id"], "fixed", account, pairs)
+    with store.transaction() as cur:
+        transition(cur, users[0]["id"], "fallback", account, pairs)
+    assert runner.step()
+    with store.transaction() as cur:
+        transition(cur, users[0]["id"], "fixed", account, pairs)
+        sending = claim(cur, account)
+        cur.execute(
+            "UPDATE messaging.messages SET first_attempt_at=clock_timestamp()-interval '25h' WHERE id=%s",
+            (sending["id"],),
+        )
+    with store.transaction() as cur:
+        assert authorize_post(cur, sending, account, pairs) is None
+    assert result(inbound)[1][0]["state"] == "failed"
+
+
+def test_agent_db_private_schema_permissions(store):
+    for role in ("anon", "authenticated"):
+        for table in ("agent_service.user_state", "agent_service.turns"):
+            with psycopg.connect(os.environ["TEST_DATABASE_URL"]) as db:
+                db.execute(psycopg.sql.SQL("SET ROLE {}").format(psycopg.sql.Identifier(role)))
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    db.execute(psycopg.sql.SQL("SELECT * FROM {}").format(psycopg.sql.Identifier(*table.split("."))))
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        with store.transaction() as cur:
+            cur.execute("DELETE FROM agent_service.turns WHERE false")
+
+
+def test_agent_db_hung_inference_does_not_stall_join_webhook_or_delivery(agent_pilot):
+    import asyncio
+    from datetime import datetime, timezone
+    import hashlib
+    import hmac
+    import json
+    from threading import Event
+    from time import monotonic, sleep
+    from unittest.mock import Mock
+
+    import httpx
+    from fastapi.testclient import TestClient
+
+    from tbd_server.agent.adapter import Generation
+    from tbd_server.agent.store import transition
+    from tbd_server.messaging.adapter import Comms
+    from tbd_server.messaging.service import Messaging
+    from tbd_server.user.api import create_app
+    from test_agent_harness import generated
+    from test_messaging_adapter import inbound
+
+    store, account, users, pairs, _, _, _, _ = agent_pilot
+    identity, email = messaging_invitation(store, "+12125557991")
+    auth = Mock()
+    auth.verified_identity.return_value = (identity, email)
+    entered, release, fixed_sent = Event(), Event(), Event()
+    service = Messaging(
+        store, "fake", "fake-secret", account, "2026-11-08T00:00:00Z", pilot_conversations=pairs,
+        agent_model="synthetic-model",
+    )
+
+    async def hung(*_):
+        entered.set()
+        while not release.is_set():
+            await asyncio.sleep(0.01)
+        return Generation(generated(reply="Stale model reply."))
+
+    def provider(request):
+        if request.method == "GET":
+            return httpx.Response(200, json={"messages": []})
+        data = json.loads(request.content)
+        if data["conversation_id"] == "fixed_a":
+            fixed_sent.set()
+        return httpx.Response(202, json={"message": {
+            "id": str(uuid4()), "conversation_id": data["conversation_id"], "line_e164": account,
+            "direction": "outbound", "channel": "imessage", "body": data["body"], "status": "sent",
+        }})
+
+    service.runner.adapter = hung
+    service.adapter.close()
+    service.adapter = service.loop.adapter = Comms("fake", transport=httpx.MockTransport(provider))
+
+    def webhook(client, conversation):
+        message = inbound(
+            id=str(uuid4()), conversation_id=conversation, line_e164=account,
+            author={"external_id": pairs[conversation]}, created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        raw = json.dumps({"event": "comms.message.received", "data": {"message": message}}).encode()
+        sig = "sha256=" + hmac.new(b"fake-secret", raw, hashlib.sha256).hexdigest()
+        assert client.post("/webhooks/comms", content=raw, headers={"X-Osis-Signature": sig}).status_code == 200
+
+    with TestClient(create_app(store, auth, "fake-provision", "fake-internal", [], messaging=service)) as client:
+        try:
+            webhook(client, "agent_a")
+            assert entered.wait(4)
+            assert client.post("/v1/join", headers={"Authorization": "Bearer fake"}).status_code == 200
+            webhook(client, "fixed_a")
+            assert client.get("/healthz").status_code == 200
+            assert fixed_sent.wait(4)
+            with store.transaction() as cur:
+                transition(cur, users[0]["id"], "fallback", account, pairs)
+        finally:
+            release.set()
+        deadline = monotonic() + 4
+        while monotonic() < deadline:
+            with store.transaction() as cur:
+                row = cur.execute(
+                    """SELECT t.outcome FROM agent_service.turns t JOIN messaging.messages m
+                    ON m.id=t.inbound_id WHERE m.user_id=%s""",
+                    (users[0]["id"],),
+                ).fetchone()
+            if row["outcome"] is not None:
+                break
+            sleep(0.02)
+        assert row["outcome"] == "fallback"
+        with store.transaction() as cur:
+            transition(cur, users[0]["id"], "fixed", account, pairs)
+
+
+def test_agent_db_repeated_model_eval(agent_pilot):
+    """Opt-in paid eval on the same real runner and versioned synthetic turns."""
+    import json
+    import re
+    from statistics import mean
+    from time import monotonic
+
+    from tbd_server.agent.adapter import OpenAI
+    from tbd_server.agent.harness import SECRET
+    from tbd_server.agent.runner import execution_config
+    from tbd_server.agent.store import current_state, transition
+    from tbd_server.messaging.core import receive_message
+
+    model = os.getenv("TBD_AGENT_MODEL")
+    key = os.getenv("TBD_AGENT_OPENAI_API_KEY")
+    if os.getenv("TBD_RUN_AGENT_EVAL") != "1" or not model or not key:
+        pytest.skip("TBD_RUN_AGENT_EVAL=1 and TBD-approved model and credentials required")
+
+    store, account, users, pairs, runner, event, _, result = agent_pilot
+    runner.config = execution_config(model)
+    provider = OpenAI(key)
+    calls, durations = [], []
+
+    async def timed(*args):
+        start = monotonic()
+        generation = await provider(*args)
+        calls.append({"ms": round((monotonic() - start) * 1000, 2), "usage": generation.usage})
+        return generation
+
+    runner.adapter = timed
+    metrics = dict(recommendation=0, follow_up=0, preference_reuse=0, no_fit=0, privacy_or_state_failures=0)
+    repeats = 3
+    for index in range(repeats):
+        cases = (
+            ("saved", "Remember condition for shoes for me is new"),
+            ("recommendation", "Compare shoes for me: Aspen is new for $80, Birch is used for $70. My budget is $90."),
+            ("preference_reuse", "Between the same two shoes above, which fits my saved condition preference?"),
+            ("no_fit", "My new maximum budget is $50. Does either of those same shoes fit?"),
+            ("follow_up", "Switch to a gift of shoes for my sister. Maple is size 8. Oak is size 10. Which fits?"),
+            ("blocked", "CVV: 123. Remember condition for shoes for me is used"),
+        )
+        for label, text in cases:
+            with store.transaction() as cur:
+                msg = receive_message(
+                    cur, event(text), current_state(cur, users[0]["id"])["enrolled_at"], agent_config=runner.config,
+                )
+            before, start = len(calls), monotonic()
+            while result(msg)[0]["outcome"] is None:
+                runner.step()
+                assert monotonic() - start < 30
+            durations.append(round((monotonic() - start) * 1000, 2))
+            turn, replies = result(msg)
+            assert len(replies) == 1
+            reply = replies[0]["text"]
+            if label in ("saved", "blocked"):
+                expected = "control" if label == "saved" else "blocked"
+                if turn["outcome"] != expected or len(calls) != before or SECRET.search(reply):
+                    metrics["privacy_or_state_failures"] += 1
+            elif turn["outcome"] == "model":
+                if label == "no_fit":
+                    metrics[label] += int(bool(re.search(r"\b(?:neither|none|both.{0,40}(?:over|exceed))\b", reply, re.I)))
+                elif label == "follow_up":
+                    metrics[label] += int(bool(turn["question"] and turn["question"]["field"] == "size"))
+                else:
+                    selects_aspen = re.search(
+                        r"(?:choose|recommend|pick|go with|select)\b.{0,36}\bAspen\b|"
+                        r"\bAspen\b.{0,50}\b(?:fits|best|recommend|better|choice|pick)\b", reply, re.I,
+                    )
+                    metrics[label] += int(bool(selects_aspen) and (label != "preference_reuse" or "new" in reply.lower()))
+        with store.transaction() as cur:
+            saved = current_state(cur, users[0]["id"])["preferences"]
+            metrics["privacy_or_state_failures"] += int(saved["shoes|me|condition"]["value"] != "new")
+            if index < repeats - 1:
+                transition(cur, users[0]["id"], "fallback", account, pairs)
+                transition(cur, users[0]["id"], "fixed", account, pairs)
+                transition(cur, users[0]["id"], "agent", account, pairs, "agent_a")
+    print(json.dumps({
+        "suite": "commerce-v1", "model": model, "repeats": repeats, "scores": metrics,
+        "useful_recommendation_rate": round((metrics["recommendation"] + metrics["preference_reuse"]) / (2 * repeats), 3),
+        "avg_turn_ms": round(mean(durations), 2), "attempts": calls,
+        "missing_usage_attempts": sum(attempt["usage"] is None for attempt in calls),
+    }))
+    assert not metrics["privacy_or_state_failures"]
+
+
+def test_agent_db_unseen_question_cannot_edit_brief(agent_pilot):
+    import json
+
+    from tbd_server.agent.adapter import Generation
+    from tbd_server.agent.store import current_state
+    from test_agent_harness import generated
+
+    store, _, users, _, runner, event, intake, result = agent_pilot
+    first = intake(event("Compare these shoes"))
+    heard = []
+
+    async def model(_, prompt, *__):
+        heard.append(json.loads(prompt))
+        return Generation(generated(
+            brief="update", edits=[{"field": "item", "value": "shoes"}],
+            question={"field": "size", "value": None},
+        ))
+
+    runner.adapter = model
+    assert runner.step()
+    question, replies = result(first)
+    assert question["question"]["field"] == "size"
+    assert replies[0]["sent_observed_at"] is None
+    answer = intake(event("9"))
+    assert runner.step()
+    assert len(heard) == 1
+    assert result(answer)[0]["outcome"] == "fallback"
+    with store.transaction() as cur:
+        brief = current_state(cur, users[0]["id"])["brief"]
+        assert "size" not in brief["fields"]

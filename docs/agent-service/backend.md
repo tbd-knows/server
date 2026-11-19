@@ -1,0 +1,66 @@
+# Agent v1 backend
+
+Agent enrolls one approved conversation per joined User. Messaging records the inbound and its selected producer in the same transaction. PostgreSQL holds enrollment, the brief and preferences, and ordered turns. The FastAPI lifespan runs two bounded Agent workers. Messaging remains the owner of Comms sends, reply ordering, status reconciliation, and contact cards.
+
+## Configuration
+
+Apply `20261119110533_agent_service.sql` before deploying the compatible backend. The migration adds the private `agent_service` schema and grants access to `tbd_user_backend`. The migration can stay applied throughout rollback.
+
+The deployed program reads the existing Messaging line and conversation allowlist. New Users start in Fixed. The app can run without either Agent environment variable.
+
+- `TBD_AGENT_MODEL` names the TBD-approved lightweight OpenAI model. Use the approved dated revision where OpenAI offers one.
+- `TBD_AGENT_OPENAI_API_KEY` is the TBD-owned inference credential.
+
+The adapter uses foreground OpenAI Responses requests with `store: false` and a strict schema. Provider abuse-monitoring retention depends on the API project's data controls. Verify the pilot project's settings before real User traffic. [OpenAI data controls](https://developers.openai.com/api/docs/guides/your-data)
+
+Each turn pins the model, prompt and schema revisions, and resource limits. The initial limits are two possible attempts, a ten-second attempt lease, a 24-second admission deadline, 1,200 output tokens, and a 16,000-byte budget for projected inputs, instructions, and schema. The initial timestamp allowance is two seconds and brief inactivity limit is seven days. Tune these with controlled evidence. Drain to Fixed before changing incompatible inference configuration.
+
+### Supported preference controls
+
+Specify a preference key, item and recipient. The keys are size, fit, condition, brand, and material. The first-person recipient is `me`.
+
+- `Remember size for shoes for me is 8 wide`
+- `Correct size for shoes for me to 9 wide`
+- `Show my preferences`
+- `Forget size for shoes for me` or `Forget all preferences`
+- `Pause memory` or `Resume memory`
+
+The app handles these commands locally. Forget and pause clear the brief and advance both context cutoffs. If combined with a shopping request, the reply asks the User to resend the shopping request.
+
+## Cutover and rollback
+
+1. Deploy the compatible revision in Fixed. Verify Join, signed webhook intake, fixed replies and contact cards. Confirm fixed-only webhook and history workers have exited.
+2. With the deployed configuration available privately, run `uv run --locked python scripts/agent_mode.py USER_UUID agent --conversation CONVERSATION` for each approved route. Record the deployed revision and model configuration separately from the test results.
+3. For a normal drain, use `agent_mode.py USER_UUID fallback`. Fallback stops new inference and settles pending turns in order. Use `agent_mode.py USER_UUID fixed` after backlog drains. The command checks the backlog under the same User lock as intake. Repeat for each enrollment.
+4. For route revocation, remove the route from the Messaging allowlist and confirm old-routing processes have exited. The delivery owner suppresses Agent replies even when paused or delayed. Known provider IDs retain read-only status reconciliation. Keep a revoked route excluded while a possible submission has an unknown provider ID.
+5. Before switching to a legacy sender, verify every enrollment is Fixed, all turns are terminal, and all linked outbound messages are in legacy no-POST states. Stop stale compatible workers and wait for in-flight provider requests to end. Keep a guard-compatible build serving until these checks hold.
+
+The following checks report only counts. Expect zeros before switching to a legacy sender.
+
+```sql
+SELECT count(*) FROM agent_service.user_state WHERE mode <> 'fixed';
+SELECT count(*) FROM agent_service.turns WHERE outcome IS NULL;
+SELECT count(*)
+FROM messaging.messages m JOIN agent_service.turns t ON t.inbound_id = m.reply_to_message_id
+WHERE m.state IN ('pending', 'sending');
+```
+
+An unknown submission can stay `uncertain` with no further POST. A known provider ID in `uncertain` or `provider_queued` supports exact-ID reconciliation. Track provider acceptance, observed send, and actual handset receipt separately.
+
+## Verification
+
+Run the existing checks with `initdb`, `pg_ctl`, and `createdb` available on PATH.
+
+```sh
+uv run --locked python scripts/run_database_tests.py -q
+uv run --locked ruff check .
+```
+
+With the approved synthetic test model and credentials in the environment, run the repeatable multi-turn eval directly against the durable runner.
+
+```sh
+TBD_RUN_AGENT_EVAL=1 uv run --locked python scripts/run_database_tests.py -q -s \
+  -o log_cli=true --log-cli-level=INFO -k agent_db_repeated_model_eval
+```
+
+The eval outputs recommendation, material question and preference reuse counts, privacy and state errors, attempt timings and known usage. Agent logs correlate queue, context, inference, and commit timings. Missing usage stays null. Reconcile possibly billed dispatches without usage with provider billing before reporting cost per useful reply.
