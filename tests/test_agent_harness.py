@@ -154,6 +154,9 @@ def test_scoped_preferences_and_gift_exception():
     active["brief"]["fields"]["recipient"] = {"value": "my sister"}
     prompt, _, _ = harness.context(cur, inbound, active)
     assert json.loads(prompt)["brief"]["id"] == "opening"
+    inbound["text"] = "Which shoes would be warmer?"
+    prompt, _, _ = harness.context(cur, inbound, active)
+    assert [p["recipient"] for p in json.loads(prompt)["preferences"]] == ["sister"]
 
 
 def test_model_edits_require_current_evidence_and_distinguish_option_price():

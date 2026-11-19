@@ -255,7 +255,7 @@ def context(cur, turn, state):
         for scope, entry in state["preferences"].items():
             item, person, key = scope.split("|")
             recipient_matches = (
-                (for_self or not (gift or for_someone))
+                (for_self or not (gift or for_someone) and (existing_person == "me" or item != existing_item))
                 if person == "me"
                 else scope_mentioned("for my " + person, normalized) or scope_mentioned("for " + person, normalized)
             )
