@@ -2541,3 +2541,67 @@ def test_agent_db_local_watermark_cannot_revive_expired_brief(agent_pilot, legac
     follow_up = intake(event("Can you compare the options again?"))
     assert runner.step() and result(follow_up)[0]["outcome"] == "model"
     assert prompts[1]["brief"] is None
+
+
+def test_agent_db_observed_gift_question_cannot_change_personal_brief(agent_pilot):
+    from datetime import datetime, timezone
+    import json
+    from time import sleep
+
+    from tbd_server.agent import harness
+    from tbd_server.agent.adapter import Generation
+    from tbd_server.agent.delivery import authorize_post
+    from tbd_server.agent.store import current_state
+    from tbd_server.messaging.adapter import SendResult
+    from tbd_server.messaging.runtime import claim, record_send_result
+    from test_agent_harness import generated
+
+    store, account, users, pairs, runner, event, intake, result = agent_pilot
+    prompts = []
+    outputs = iter([
+        generated(brief="update", edits=[{"field": "item", "value": "shoes"}, {"field": "size", "value": "8"}]),
+        generated(question={"field": "size", "value": None}),
+        generated(brief="update", edits=[{"field": "size", "value": "10"}]),
+    ])
+
+    async def model(_, prompt, *__):
+        prompts.append(json.loads(prompt))
+        return Generation(next(outputs))
+
+    def observe_sent(inbound):
+        with store.transaction() as cur:
+            job = claim(cur, account)
+            assert job["reply_to_message_id"] == inbound["id"]
+        with store.transaction() as cur:
+            assert authorize_post(cur, job, account, pairs) is not None
+        with store.transaction() as cur:
+            assert record_send_result(
+                cur, job["id"], job["attempt_id"],
+                SendResult("sent", str(uuid4()), observed_status="sent"), agent_guard=True,
+            )
+        return result(inbound)[1][0]
+
+    runner.adapter = model
+    own = intake(event("Compare shoes for me. I need size 8."))
+    assert runner.step() and result(own)[0]["outcome"] == "model"
+    observe_sent(own)
+    with store.transaction() as cur:
+        before = current_state(cur, users[0]["id"])["brief"]
+    assert before["fields"]["size"]["value"] == "8"
+
+    gift = intake(event("Compare these shoes for a friend"))
+    assert runner.step()
+    assert prompts[1]["brief"] is None
+    observed = observe_sent(gift)
+    assert "What size" in observed["text"]
+    assert observed["sent_observed_at"] is not None
+    sleep(harness.SKEW.total_seconds())
+    answer = intake(event("10", at=datetime.now(timezone.utc)))
+    assert harness.visible(observed, answer)
+    assert runner.step()
+
+    with store.transaction() as cur:
+        assert current_state(cur, users[0]["id"])["brief"] == before
+    assert result(gift)[0]["question"] is None
+    assert result(answer)[1][0]["text"] == harness.RESTATEMENT
+    assert len(prompts) == 2

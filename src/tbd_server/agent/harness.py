@@ -270,6 +270,20 @@ def recipient_scope(value):
     return "me" if person == "myself" else person
 
 
+def unclear_recipient(text, constraints):
+    return "recipient" not in constraints and bool(
+        re.search(r"\b(?:gifts?|for (?:my|a|an|our|the|someone))\b", text, re.I)
+    )
+
+
+def brief_matches_request(brief, text, constraints):
+    if brief is None or unclear_recipient(text, constraints) or re.search(r"\b(?:switch|instead)\b", text, re.I):
+        return False
+    recipient = constraints.get("recipient")
+    stored = brief["fields"].get("recipient", {}).get("value", "me")
+    return recipient is None or recipient_scope(recipient) == recipient_scope(stored)
+
+
 def brief_in_use(cur, turn, brief):
     if brief is None:
         return None
@@ -321,6 +335,7 @@ def context(cur, turn, state):
     text = turn["text"]
     brief = brief_in_use(cur, turn, state["brief"])
     constraints = current_constraints(text)
+    projected_brief = brief if brief_matches_request(brief, text, constraints) else None
     eligible = [
         p
         for p in previous
@@ -331,7 +346,7 @@ def context(cur, turn, state):
     ]
     answer = None
     if previous and eligible and previous[0] is eligible[0] and visible(previous[0], turn):
-        answer = typed_answer(text, previous[0]["question"], brief)
+        answer = typed_answer(text, previous[0]["question"], projected_brief)
     # Pure acknowledgments and isolated values require the immediately prior question.
     isolated = re.fullmatch(
         r"(?:yes(?: please)?|no(?: thanks)?|correct|sure|size [\w.]+|[\d.]+|\$[\d,.]+|XS|S|M|L|XL|XXL)",
@@ -351,22 +366,12 @@ def context(cur, turn, state):
     existing_person = recipient_scope(current.get("recipient", {}).get("value", "me"))
     recipient = constraints.get("recipient")
     explicit_recipient = recipient_scope(recipient) if recipient else None
-    gift = re.search(r"\bgifts?\b", normalized)
-    # An unresolved recipient mention must not inherit personal preferences.
-    uncertain_recipient = explicit_recipient is None and (
-        gift or bool(re.search(r"\bfor (?:my|a|an|our|the|someone)\b", normalized))
-    )
-    new_scope = (
-        bool(re.search(r"\b(?:switch|instead)\b", normalized))
-        or uncertain_recipient
-        or (explicit_recipient is not None and explicit_recipient != existing_person)
-    )
-    if not state["paused"] and not uncertain_recipient:
+    if not state["paused"] and not unclear_recipient(text, constraints):
         for scope, entry in state["preferences"].items():
             item, person, key = scope.split("|")
             recipient_for_item = explicit_recipient or (existing_person if item == existing_item else "me")
             explicit_scope = scope_mentioned(item, normalized) and person == recipient_for_item
-            continuing_scope = (item, person) == (existing_item, existing_person) and not new_scope
+            continuing_scope = projected_brief is not None and (item, person) == (existing_item, existing_person)
             if (explicit_scope or continuing_scope) and not SECRET.search(entry["value"]):
                 preferences.append({"item": item, "recipient": person, "key": key, "value": entry["value"]})
     recent = [
@@ -377,7 +382,7 @@ def context(cur, turn, state):
         "current": text,
         "current_constraints": constraints,
         "typed_answer": answer,
-        "brief": None if new_scope else brief,
+        "brief": projected_brief,
         "preferences": preferences,
         "recent": recent,
     }
@@ -408,6 +413,7 @@ def validate(raw, turn, brief, answer):
     result = Result.model_validate_json(raw)
     text = turn["text"]
     constraints = current_constraints(text)
+    existing_brief_eligible = brief_matches_request(brief, text, constraints)
     reply = result.reply.strip()
     if (
         not reply
@@ -441,10 +447,8 @@ def validate(raw, turn, brief, answer):
         ):
             raise ValueError("Missing switch evidence")
         recipient = constraints.get("recipient")
-        if brief and recipient:
-            old_recipient = brief["fields"].get("recipient", {}).get("value", "me")
-            if recipient_scope(old_recipient) != recipient_scope(recipient) and result.brief != "replace":
-                raise BriefEvidenceError("A different recipient requires a separate brief")
+        if brief and result.brief == "update" and not existing_brief_eligible:
+            raise BriefEvidenceError("The current request cannot edit this brief")
         brief = (
             json.loads(json.dumps(brief))
             if brief and result.brief == "update"
@@ -495,9 +499,19 @@ def validate(raw, turn, brief, answer):
             raise ValueError("Incomplete or oversized brief")
     target = None
     if result.question:
-        if not brief or "?" in reply:
+        if "?" in reply:
             raise ValueError("Ambiguous question")
         field, value = result.question.field, result.question.value
+        if result.brief == "unchanged" and not existing_brief_eligible:
+            # The app can ask for a detail without making a short answer
+            # eligible to edit a brief from a different request.
+            return (
+                f"What {field} should I use for this request? Please include the item and who it’s for.",
+                brief,
+                None,
+            )
+        if not brief:
+            raise ValueError("A question target requires a brief")
         if value is not None and value != brief["fields"].get(field, {}).get("value"):
             raise ValueError("Unsupported question target")
         target = {"brief_id": brief["id"], "field": field, "value": value}

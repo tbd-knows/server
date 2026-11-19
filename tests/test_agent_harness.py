@@ -343,9 +343,26 @@ def test_gift_to_a_friend_excludes_self_preferences_and_brief():
     edits = [{"field": "item", "value": "shoes"}, {"field": "recipient", "value": "a friend"}]
     with pytest.raises(harness.BriefEvidenceError):
         harness.validate(generated(brief="update", edits=edits), inbound, original_brief, None)
-    _, replacement, _ = harness.validate(generated(brief="replace", edits=edits), inbound, original_brief, None)
+    question = {"field": "size", "value": None}
+    clarification, unchanged, target = harness.validate(
+        generated(question=question),
+        inbound,
+        original_brief,
+        None,
+    )
+    assert "What size" in clarification
+    assert unchanged == original_brief and target is None
+
+    _, replacement, target = harness.validate(
+        generated(brief="replace", edits=edits, question=question),
+        inbound,
+        original_brief,
+        None,
+    )
     assert replacement["fields"]["recipient"]["value"] == "a friend"
     assert "size" not in replacement["fields"]
+    assert target == {"brief_id": replacement["id"], **question}
+    assert target["brief_id"] != original_brief["id"]
 
 
 def test_brief_expiry_uses_accepted_edit_time_and_read_only_turn_does_not_renew():
