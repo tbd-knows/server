@@ -24,6 +24,7 @@ SECRET = re.compile(
     r"\b(?:card (?:number|details)|credit card|debit card|cvv|cvc|security code|password|passcode|"
     r"one[- ]time (?:code|password)|verification code|otp|api[ _-]?key|access token|"
     r"secret key|private key|recovery phrase|pin)\s*(?:is\s+|[:=]\s*|\s+)\S+"
+    r"|\bauthorization\s*:\s*bearer\s+\S+"
     r"|\b(?:sk-(?:proj-)?|gh[pousr]_|github_pat_|xox[baprs]-)[a-zA-Z0-9_-]{12,}"
     r"|-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----"
     r"|\b(?:\d[ -]?){13,19}\b",
@@ -333,12 +334,20 @@ def unclear_recipient(text, constraints):
     )
 
 
+def brief_item_matches(brief, constraints):
+    item = constraints.get("item")
+    stored = brief["fields"].get("item", {}).get("value", "")
+    return item is None or item.casefold() == stored.casefold()
+
+
 def brief_matches_request(brief, text, constraints):
     if brief is None or unclear_recipient(text, constraints) or re.search(r"\b(?:switch|instead)\b", text, re.I):
         return False
     recipient = constraints.get("recipient")
     stored = brief["fields"].get("recipient", {}).get("value", "me")
-    return recipient is None or recipient_scope(recipient) == recipient_scope(stored)
+    return brief_item_matches(brief, constraints) and (
+        recipient is None or recipient_scope(recipient) == recipient_scope(stored)
+    )
 
 
 def gift_size_for_reply(text, constraints):
@@ -545,6 +554,7 @@ def validate(raw, turn, brief, answer, *, require_gift_size=False):
         if (
             result.brief == "replace"
             and brief
+            and brief_item_matches(brief, constraints)
             and "recipient" not in constraints
             and not re.search(
                 r"\b(?:instead|switch|new|different|now (?:I|look|find)|for my|for me|gift"

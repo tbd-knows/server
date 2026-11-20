@@ -2990,3 +2990,199 @@ def test_agent_db_recommendation_diagnostics(agent_pilot, monkeypatch, response,
             assert brief["options"][0]["value"] == "Aspen is new for $80"
     else:
         assert turn["outcome"] == "fallback" and brief is None
+
+
+def test_agent_db_labeled_bearer_credential_stays_out_of_inference_and_history(agent_pilot):
+    import json
+
+    from tbd_server.agent.adapter import Generation
+    from tbd_server.agent.harness import SENSITIVE
+    from test_agent_harness import generated
+
+    _, _, _, _, runner, event, intake, result = agent_pilot
+    projected = []
+    credential = "Authorization: Bearer tbd-review-fake-credential-0123456789"
+
+    async def provider(_, prompt, *__):
+        projected.append(json.loads(prompt))
+        return Generation(generated(reply="I can help compare options."))
+
+    runner.adapter = provider
+    secret = intake(event(credential))
+    assert runner.step()
+    turn, replies = result(secret)
+    assert turn["outcome"] == "blocked" and projected == []
+    assert len(replies) == 1 and replies[0]["text"] == SENSITIVE
+
+    ordinary = intake(event("Compare shoes"))
+    assert runner.step() and result(ordinary)[0]["outcome"] == "model"
+    assert len(projected) == 1
+    assert projected[0]["recent"] == []
+    assert credential not in json.dumps(projected)
+
+
+def test_agent_db_item_switch_requires_replacement_and_cannot_bind_old_brief(agent_pilot):
+    import json
+
+    from tbd_server.agent.adapter import Generation
+    from tbd_server.agent.store import current_state
+    from test_agent_harness import generated
+
+    store, _, users, _, runner, event, intake, result = agent_pilot
+    projected = []
+    outputs = iter(
+        [
+            generated(
+                brief="update",
+                edits=[
+                    {"field": "item", "value": "shoes"},
+                    {"field": "budget", "value": "$90"},
+                    {"field": "option", "value": "Aspen costs $80"},
+                ],
+            ),
+            generated(brief="update", edits=[{"field": "budget", "value": "$50"}]),
+            generated(question={"field": "size", "value": None}),
+            generated(
+                brief="replace",
+                edits=[
+                    {"field": "item", "value": "backpacks"},
+                    {"field": "budget", "value": "$50"},
+                ],
+                question={"field": "size", "value": None},
+            ),
+        ]
+    )
+
+    async def provider(_, prompt, *__):
+        projected.append(json.loads(prompt))
+        return Generation(next(outputs))
+
+    def brief():
+        with store.transaction() as cur:
+            return current_state(cur, users[0]["id"])["brief"]
+
+    runner.adapter = provider
+    initial = intake(event("Compare shoes. Aspen costs $80. My budget is $90."))
+    assert runner.step() and result(initial)[0]["outcome"] == "model"
+    shoes = brief()
+    assert shoes["fields"]["budget"]["value"] == "$90"
+
+    invalid_update = intake(event("Compare backpacks for me. My budget is $50."))
+    assert runner.step()
+    assert projected[1]["current_constraints"]["item"] == "backpacks" and projected[1]["brief"] is None
+    assert result(invalid_update)[0]["outcome"] == "fallback" and brief() == shoes
+
+    unbound = intake(event("Compare backpacks. My budget is $50."))
+    assert runner.step()
+    turn, replies = result(unbound)
+    assert turn["outcome"] == "model" and turn["question"] is None
+    assert "What size" in replies[0]["text"] and brief() == shoes
+
+    replacement = intake(event("Compare backpacks. My budget is $50."))
+    assert runner.step()
+    turn, _ = result(replacement)
+    assert turn["outcome"] == "model"
+    backpacks = brief()
+    assert backpacks["id"] == str(replacement["id"])
+    assert backpacks["fields"]["item"]["value"] == "backpacks"
+    assert backpacks["fields"]["budget"]["value"] == "$50"
+    assert backpacks["options"] == []
+    assert turn["question"] == {"brief_id": backpacks["id"], "field": "size", "value": None}
+
+
+def test_agent_db_orderly_shutdown_saves_provider_result_before_route_revocation(agent_pilot):
+    from threading import Event
+    from unittest.mock import Mock
+
+    from psycopg.rows import dict_row
+
+    from tbd_server.messaging.adapter import SendResult
+    from tbd_server.messaging.runtime import LOCK_ID, DeliveryLoop
+
+    store, account, _, pairs, runner, event, intake, result = agent_pilot
+    inbound = intake(event("Compare shoes"))
+    assert runner.step()
+    adapter = Mock()
+    loop = DeliveryLoop(store.database_url, adapter, account, lambda *_: False, agent_pairs=pairs)
+    posting = Event()
+
+    def send(_):
+        posting.set()
+        assert loop.stop_event.wait(5)
+        return SendResult("sent", "synthetic-shutdown-id", observed_status="sent")
+
+    adapter.send.side_effect = send
+    loop.start()
+    try:
+        assert posting.wait(6)
+    finally:
+        loop.stop()
+
+    assert adapter.send.call_count == 1 and loop.pending_result is None
+    observed = result(inbound)[1][0]
+    assert observed["state"] == "sent" and observed["provider_message_id"] == "synthetic-shutdown-id"
+    assert observed["sent_observed_at"] is not None
+    assert observed["attempt_id"] == adapter.send.call_args.args[0]["attempt_id"]
+
+    replacement_adapter = Mock()
+    replacement = DeliveryLoop(store.database_url, replacement_adapter, account, lambda *_: False, agent_pairs={})
+    with psycopg.connect(store.database_url, autocommit=True, row_factory=dict_row) as db:
+        assert db.execute("SELECT pg_try_advisory_lock(%s) AS owned", (LOCK_ID,)).fetchone()["owned"]
+        replacement.turn(db)
+    replacement_adapter.send.assert_not_called()
+    assert result(inbound)[1][0] == observed
+
+
+def test_agent_db_expired_delivery_keeps_account_quota_pause(agent_pilot):
+    from time import monotonic
+    from unittest.mock import Mock
+
+    from psycopg.rows import dict_row
+
+    from tbd_server.agent.delivery import authorize_post
+    from tbd_server.messaging.adapter import SendResult
+    from tbd_server.messaging.runtime import DeliveryLoop, claim, record_send_result
+
+    store, account, _, pairs, runner, event, intake, result = agent_pilot
+    first = intake(event("Compare shoes"))
+    other = intake(event("Compare socks", "agent_b"))
+    assert runner.step() and runner.step()
+    with store.transaction() as cur:
+        job = claim(cur, account)
+        assert job["reply_to_message_id"] == first["id"]
+        assert authorize_post(cur, job, account, pairs)
+        assert record_send_result(
+            cur,
+            job["id"],
+            job["attempt_id"],
+            SendResult("pending", error_code="quota", retry_after=3600),
+            agent_guard=True,
+        )
+        cur.execute(
+            "UPDATE messaging.messages SET first_attempt_at=clock_timestamp()-interval '24 hours 1 second' WHERE id=%s",
+            (job["id"],),
+        )
+    paused_until = result(first)[1][0]["next_action_at"]
+
+    adapter = Mock()
+    adapter.send.return_value = SendResult("sent", "synthetic-second-route-id", observed_status="sent")
+    loop = DeliveryLoop(store.database_url, adapter, account, lambda *_: False, agent_pairs=pairs)
+    loop.last_send = monotonic() - 2
+    loop.category = 1
+    with psycopg.connect(store.database_url, autocommit=True, row_factory=dict_row) as db:
+        loop.turn(db)
+        expired = result(first)[1][0]
+        assert expired["state"] == "uncertain"
+        assert expired["error_code"] == "quota" and expired["next_action_at"] == paused_until
+        assert result(other)[1][0]["state"] == "pending"
+        adapter.send.assert_not_called()
+
+        with loop.transaction(db) as cur:
+            cur.execute("UPDATE messaging.messages SET next_action_at=clock_timestamp() WHERE id=%s", (job["id"],))
+        loop.category = 1
+        loop.turn(db)
+    assert adapter.send.call_count == 1
+    assert adapter.send.call_args.args[0]["reply_to_message_id"] == other["id"]
+    assert result(other)[1][0]["state"] == "sent"
+    expired = result(first)[1][0]
+    assert expired["state"] == "uncertain" and expired["attempt_count"] == 1

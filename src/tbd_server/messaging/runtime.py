@@ -34,7 +34,10 @@ def emit(event, **fields):
 
 def claim(cur, account):
     cur.execute(
-        """UPDATE messaging.messages SET state='uncertain',error_code='idempotency_expired',updated_at=now()
+        """UPDATE messaging.messages SET state='uncertain',
+        error_code=CASE WHEN error_code IN ('quota','account_configuration','rate_limited')
+          AND next_action_at>now() THEN error_code ELSE 'idempotency_expired' END,
+        updated_at=now()
         WHERE direction='outbound' AND account_ref=%s AND state='pending'
         AND provider_message_id IS NULL AND first_attempt_at<=now()-interval '24 hours'""",
         (account,),
@@ -372,7 +375,8 @@ class DeliveryLoop:
     def save_result(self, db):
         # Keep known outcomes across database reconnections; never re-POST them.
         job, result = self.pending_result
-        while not self.stop_event.is_set():
+        # Attempt the transaction even when shutdown started during the POST.
+        while True:
             try:
                 with self.transaction(db) as cur:
                     applied = record_send_result(
@@ -395,4 +399,5 @@ class DeliveryLoop:
                 if db.closed or db.broken:
                     raise
                 self.last_tick = monotonic()
-                self.stop_event.wait(1)
+                if self.stop_event.wait(1):
+                    return
