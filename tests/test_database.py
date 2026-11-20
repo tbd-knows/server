@@ -3186,3 +3186,293 @@ def test_agent_db_expired_delivery_keeps_account_quota_pause(agent_pilot):
     assert result(other)[1][0]["state"] == "sent"
     expired = result(first)[1][0]
     assert expired["state"] == "uncertain" and expired["attempt_count"] == 1
+
+
+def test_agent_db_quoted_bearer_credential_stays_out_of_inference_and_history(agent_pilot):
+    import json
+
+    from tbd_server.agent.adapter import Generation
+    from tbd_server.agent.harness import SENSITIVE
+    from test_agent_harness import generated
+
+    _, _, _, _, runner, event, intake, result = agent_pilot
+    prompts = []
+    credential = json.dumps({"Authorization": "Bearer tbd-review-fake-credential-0123456789"})
+
+    async def provider(_, prompt, *__):
+        prompts.append(json.loads(prompt))
+        return Generation(generated(reply="I can help compare options."))
+
+    runner.adapter = provider
+    secret = intake(event(credential))
+    assert runner.step()
+    turn, replies = result(secret)
+    assert turn["outcome"] == "blocked" and prompts == []
+    assert len(replies) == 1 and replies[0]["text"] == SENSITIVE
+
+    later = intake(event("Compare shoes"))
+    assert runner.step() and result(later)[0]["outcome"] == "model"
+    assert len(prompts) == 1 and prompts[0]["recent"] == []
+    assert "tbd-review-fake-credential" not in json.dumps(prompts)
+
+
+@pytest.mark.parametrize(
+    "ambiguous,clarification",
+    [
+        ("Compare backpacks. Compare jackets. My budget is $50.", "Which item should I focus on?"),
+        ("Compare shoes for Alice. Compare shoes for Beth. My budget is $50.", "Who are you shopping for?"),
+    ],
+)
+def test_agent_db_conflicting_brief_scope_prompts_locally(agent_pilot, ambiguous, clarification):
+    from tbd_server.agent.adapter import Generation
+    from tbd_server.agent.store import current_state
+    from test_agent_harness import generated
+
+    store, _, users, _, runner, event, intake, result = agent_pilot
+    prompts = []
+    outputs = iter(
+        [
+            generated(
+                brief="update",
+                edits=[
+                    {"field": "item", "value": "shoes"},
+                    {"field": "budget", "value": "$90"},
+                    {"field": "option", "value": "Aspen costs $80"},
+                ],
+            ),
+            generated(
+                brief="update", edits=[{"field": "budget", "value": "$50"}], question={"field": "size", "value": None}
+            ),
+        ]
+    )
+
+    async def provider(_, prompt, *__):
+        prompts.append(prompt)
+        return Generation(next(outputs))
+
+    runner.adapter = provider
+    initial = intake(event("Compare shoes. Aspen costs $80. My budget is $90."))
+    assert runner.step() and result(initial)[0]["outcome"] == "model"
+    with store.transaction() as cur:
+        shoes = current_state(cur, users[0]["id"])["brief"]
+
+    conflict = intake(event(ambiguous))
+    assert runner.step()
+    turn, replies = result(conflict)
+    assert len(prompts) == 1 and len(replies) == 1
+    assert replies[0]["text"] == clarification and turn["question"] is None
+    with store.transaction() as cur:
+        brief = current_state(cur, users[0]["id"])["brief"]
+    assert brief == shoes and brief["fields"]["budget"]["value"] == "$90"
+
+
+def test_agent_db_polite_order_request_and_false_confirmation(agent_pilot):
+    from tbd_server.agent.adapter import Generation
+    from tbd_server.agent.harness import FALLBACK, TRANSACTION
+    from test_agent_harness import generated
+
+    _, _, _, _, runner, event, intake, result = agent_pilot
+    prompts = []
+
+    async def provider(_, prompt, *__):
+        prompts.append(prompt)
+        return Generation(generated(reply="I have already placed the order."))
+
+    runner.adapter = provider
+    order = intake(event("Can you please order these for me?"))
+    assert runner.step()
+    turn, replies = result(order)
+    assert turn["outcome"] == "transaction" and prompts == []
+    assert replies[0]["text"] == TRANSACTION
+
+    comparison = intake(event("Compare these shoes"))
+    assert runner.step()
+    turn, replies = result(comparison)
+    assert len(prompts) == 1 and turn["outcome"] == "fallback"
+    assert replies[0]["text"] == FALLBACK
+
+
+def test_agent_db_reapproval_checks_older_unresolved_sends_by_exact_route(agent_pilot):
+    from tbd_server.agent.delivery import authorize_post, suppress_revoked
+    from tbd_server.agent.store import current_state, transition
+    from tbd_server.messaging.adapter import SendResult
+    from tbd_server.messaging.runtime import claim, record_send_result
+
+    store, account, users, pairs, runner, event, intake, result = agent_pilot
+    user_id = users[0]["id"]
+    first = intake(event("Compare shoes"))
+    assert runner.step()
+    first_enrollment = result(first)[0]["enrollment_id"]
+    with store.transaction() as cur:
+        transition(cur, user_id, "fallback", account, pairs)
+        transition(cur, user_id, "fixed", account, pairs)
+        transition(cur, user_id, "agent", account, pairs, "agent_a")
+        assert current_state(cur, user_id)["enrollment_id"] != first_enrollment
+        job = claim(cur, account)
+        assert job["reply_to_message_id"] == first["id"]
+        assert authorize_post(cur, job, account, pairs)
+        assert record_send_result(
+            cur,
+            job["id"],
+            job["attempt_id"],
+            SendResult("pending", error_code="transport_unknown"),
+            agent_guard=True,
+        )
+
+    pending = intake(event("Compare socks"))
+    with store.transaction() as cur:
+        transition(cur, user_id, "fallback", account, {})
+    with pytest.raises(Problem, match="backlog has not drained"):
+        with store.transaction() as cur:
+            transition(cur, user_id, "fixed", account, {})
+    runner.pairs = {}
+    assert runner.step() and result(pending)[0]["outcome"] == "revoked"
+    with store.transaction() as cur:
+        transition(cur, user_id, "fixed", account, {})
+        suppress_revoked(cur, account, {})
+    turn, replies = result(first)
+    assert turn["delivery_suppressed"]
+    assert replies[0]["state"] == "uncertain" and replies[0]["provider_message_id"] is None
+
+    with pytest.raises(Problem, match="Retire the previous route"):
+        with store.transaction() as cur:
+            transition(cur, user_id, "agent", account, pairs, "fixed_a")
+    with pytest.raises(Problem, match="unresolved delivery"):
+        with store.transaction() as cur:
+            transition(cur, user_id, "agent", account, pairs, "agent_a")
+
+    with store.transaction() as cur:
+        transition(cur, user_id, "agent", account, {"fixed_a": pairs["fixed_a"]}, "fixed_a")
+        assert current_state(cur, user_id)["conversation_id"] == "fixed_a"
+
+
+def test_agent_db_paid_brief_scope_transition(agent_pilot):
+    import json
+    import subprocess
+    from time import monotonic, sleep
+
+    from tbd_server.agent import harness
+    from tbd_server.agent.adapter import Generation, OpenAI
+    from tbd_server.agent.runner import execution_config
+    from tbd_server.agent.store import current_state
+    from tbd_server.messaging.core import receive_message
+    from test_agent_harness import generated
+
+    model = os.getenv("TBD_AGENT_MODEL")
+    key = os.getenv("TBD_AGENT_OPENAI_API_KEY")
+    if os.getenv("TBD_RUN_AGENT_EVAL") != "1" or not model or not key:
+        pytest.skip("TBD_RUN_AGENT_EVAL=1 and TBD-approved model and credentials required")
+
+    store, account, users, pairs, runner, event, _, result = agent_pilot
+    user_id = users[0]["id"]
+    runner.config = execution_config(model)
+    provider = OpenAI(key)
+    prompts = []
+    records = []
+
+    async def paid(model, prompt, *args):
+        prompts.append(json.loads(prompt))
+        started = monotonic()
+        generation = await provider(model, prompt, *args)
+        records.append(
+            {
+                "inference_ms": round((monotonic() - started) * 1000, 2),
+                "usage": generation.usage,
+                "provider_reason": generation.reason,
+            }
+        )
+        return generation
+
+    async def seed(*_):
+        return Generation(
+            generated(
+                reply="Aspen costs $80 and Birch costs $105.",
+                brief="update",
+                edits=[
+                    {"field": "item", "value": "shoes"},
+                    {"field": "budget", "value": "$90"},
+                    {"field": "option", "value": "Aspen costs $80"},
+                    {"field": "option", "value": "Birch costs $105"},
+                ],
+            )
+        )
+
+    async def ask_budget(*_):
+        return Generation(
+            generated(
+                reply="I can use a new budget for these shoes.",
+                question={"field": "budget", "value": None},
+            )
+        )
+
+    def run(body, adapter):
+        runner.adapter = adapter
+        with store.transaction() as cur:
+            inbound = receive_message(
+                cur,
+                event(body),
+                current_state(cur, user_id)["enrolled_at"],
+                agent_config=runner.config,
+            )
+        start = monotonic()
+        turn, replies = result(inbound)
+        while turn["outcome"] is None:
+            runner.step()
+            assert monotonic() - start < 30
+            turn, replies = result(inbound)
+        assert len(replies) == 1
+        return inbound, turn, replies[0]["text"]
+
+    def active_brief():
+        with store.transaction() as cur:
+            return current_state(cur, user_id)["brief"]
+
+    initial, seed_turn, _ = run("Compare shoes. Aspen costs $80. Birch costs $105. My budget is $90.", seed)
+    assert seed_turn["outcome"] == "model"
+    shoes = active_brief()
+    observe_agent_reply_sent(store, account, pairs, initial, result)
+
+    carried, carry_turn, carry_reply = run("Which of the saved options is within my budget? Include the price.", paid)
+    assert prompts[0]["brief"] == shoes and prompts[0]["current_constraints"] == {}
+    observe_agent_reply_sent(store, account, pairs, carried, result)
+
+    question_inbound, question_turn, _ = run("Compare shoes.", ask_budget)
+    assert question_turn["question"] == {"brief_id": shoes["id"], "field": "budget", "value": None}
+    observed = observe_agent_reply_sent(store, account, pairs, question_inbound, result)
+    sleep(harness.SKEW.total_seconds())
+    switched, switch_turn, switch_reply = run(
+        "Compare backpacks. Rowan costs $45. Cedar costs $75. My budget is $60. Which is within budget? Include the price.",
+        paid,
+    )
+    assert harness.visible(observed, switched)
+    carry_used = carry_turn["outcome"] == "model" and "aspen" in carry_reply.casefold() and "$80" in carry_reply
+    switch_used = switch_turn["outcome"] == "model" and "rowan" in switch_reply.casefold() and "$45" in switch_reply
+    old_brief_excluded = prompts[-1]["brief"] is None
+    old_question_excluded = prompts[-1]["typed_answer"] is None and (
+        switch_turn["question"] is None or switch_turn["question"]["brief_id"] != shoes["id"]
+    )
+    after_switch = active_brief()
+    old_brief_preserved = after_switch == shoes or (
+        after_switch is not None and after_switch["id"] == str(switched["id"]) and after_switch["fields"]["item"]["value"] == "backpacks"
+    )
+    print(
+        json.dumps(
+            {
+                "suite": "commerce-v1-brief-scope",
+                "sha": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+                "model": model,
+                "carried_brief_used": carry_used,
+                "item_switch_answered": switch_used,
+                "old_brief_excluded": old_brief_excluded,
+                "old_question_excluded": old_question_excluded,
+                "old_brief_preserved_or_validly_replaced": old_brief_preserved,
+                "turns": [
+                    {"case": "carried_brief", "outcome": carry_turn["outcome"], "rendered_reply": carry_reply},
+                    {"case": "item_switch", "outcome": switch_turn["outcome"], "rendered_reply": switch_reply},
+                ],
+                "attempts": records,
+            }
+        )
+    )
+    assert carry_used and switch_used
+    assert old_brief_excluded and old_question_excluded and old_brief_preserved

@@ -62,9 +62,12 @@ With the approved synthetic test model and credentials in the environment, run t
 
 ```sh
 TBD_RUN_AGENT_EVAL=1 uv run --locked python scripts/run_database_tests.py -q -s \
-  -o log_cli=true --log-cli-level=INFO -k agent_db_repeated_model_eval
+  -o log_cli=true --log-cli-level=INFO \
+  -k 'agent_db_repeated_model_eval or agent_db_paid_brief_scope_transition'
 ```
 
 The eval outputs recommendation, material question and preference reuse counts, privacy and state errors, attempt timings and known usage. Agent logs correlate queue, context, inference, and commit timings. Missing usage stays null. Reconcile possibly billed dispatches without usage with provider billing before reporting cost per useful reply.
 
 The report includes the exact Git SHA and a row per case and repeat with its outcome, fallback reason, and attempt timings. It scores a useful gift size clarification separately from a saved question target. For the approved GPT-5.4 mini snapshot, the report estimates known spend using standard list rates. Spend per useful reply is calculated only when every attempt has priceable usage, and counts useful recommendations, correct no-fit replies, and useful gift clarifications. Reconcile the estimate with billed usage. [OpenAI model rates](https://developers.openai.com/api/docs/models/gpt-5.4-mini)
+
+The separate `commerce-v1-brief-scope` report uses controlled setup turns and two live model turns. It checks a recommendation from a carried shoes brief, then sends a backpack request after observing a shoes question as sent. The report verifies that the old brief and question cannot apply to the backpack request. These turns have their own usage and timing records.

@@ -24,14 +24,14 @@ SECRET = re.compile(
     r"\b(?:card (?:number|details)|credit card|debit card|cvv|cvc|security code|password|passcode|"
     r"one[- ]time (?:code|password)|verification code|otp|api[ _-]?key|access token|"
     r"secret key|private key|recovery phrase|pin)\s*(?:is\s+|[:=]\s*|\s+)\S+"
-    r"|\bauthorization\s*:\s*bearer\s+\S+"
+    r"""|\bauthorization["']?\s*:\s*["']?bearer\s+[^\s"']+"""
     r"|\b(?:sk-(?:proj-)?|gh[pousr]_|github_pat_|xox[baprs]-)[a-zA-Z0-9_-]{12,}"
     r"|-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----"
     r"|\b(?:\d[ -]?){13,19}\b",
     re.I,
 )
 ACTION = re.compile(
-    r"^(?:please\s+|can you\s+|could you\s+)?(?:"
+    r"^(?:please\s+)?(?:(?:can|could) you\s+(?:please\s+)?)?(?:"
     r"(?:buy|purchase|order|pay(?: for)?|checkout|place (?:an |the |my )?order)\b"
     r"|(?:check|verify|track|confirm)\b.{0,40}\b(?:order|payment|shipping|delivery|status)\b"
     r"|(?:where is|what(?: is|'s)|did|has|is)\b.{0,40}\b(?:order|payment|package)\b"
@@ -85,7 +85,7 @@ CONSTRAINTS = {
     "material": r"(?:my material(?: is|:)|i (?:need|want|prefer)) (cotton|linen|wool|leather|silk|polyester|nylon|denim|suede)",
 }
 FALSE_CONFIRMATION = re.compile(
-    r"\b(?:I|we)(?: (?:have |just )?|[’']ve )"
+    r"\b(?:I|we)(?: (?:have )?|[’']ve )(?:already |just )?"
     r"(?:saved|forgot|ordered|purchased|bought|paid|verified|placed (?:an|the|your|this) order)\b"
     r"|\b(?:order|payment) (?:is |was |has been )?(?:confirmed|completed|placed|verified)\b",
     re.I,
@@ -279,8 +279,19 @@ def message_clauses(text):
     return [clause.strip().strip(",").strip() for clause in clauses]
 
 
+SCOPE_CLARIFICATIONS = {
+    ("item",): "Which item should I focus on?",
+    ("recipient",): "Who are you shopping for?",
+    ("item", "recipient"): "Which item should I focus on, and who is it for?",
+}
+
+
 def current_constraints(text, brief=None):
-    """Read complete values from explicit shopping requests and first-party clauses."""
+    return request_constraints(text, brief)[0]
+
+
+def request_constraints(text, brief=None):
+    """Read explicit constraints and retain conflicts in the request's scope."""
     values = {}
     recipient_sizes = {}
     for clause in message_clauses(text):
@@ -301,7 +312,8 @@ def current_constraints(text, brief=None):
         if request:
             details = clause[request.end() :].split(":", 1)[0]
             for recipient in RECIPIENT.finditer(details):
-                values.setdefault("recipient", {})[recipient[1].casefold()] = recipient[1]
+                value = recipient[1].casefold()
+                values.setdefault("recipient", {})["me" if value == "myself" else value] = recipient[1]
             item = re.split(r"\s+(?:for|with|under|up to|at most|by|in size)\b|,", details, maxsplit=1, flags=re.I)[
                 0
             ].strip()
@@ -309,6 +321,9 @@ def current_constraints(text, brief=None):
             if re.fullmatch(r"[\w-]+(?: [\w-]+){0,5}", item) and item.casefold() not in ("these", "them", "it", "this"):
                 values.setdefault("item", {})[item.casefold()] = item
     constraints = {field: next(iter(choices.values())) for field, choices in values.items() if len(choices) == 1}
+    conflicts = tuple(field for field in ("item", "recipient") if len(values.get(field, {})) > 1)
+    if conflicts:
+        return constraints, conflicts
     recipient = constraints.get("recipient")
     if recipient and (scope := recipient_scope(recipient)) != "me":
         # First-person sizes belong to the shopper. A gift needs its own size evidence.
@@ -320,7 +335,7 @@ def current_constraints(text, brief=None):
         stored_recipient = brief["fields"].get("recipient", {}).get("value", "me")
         if recipient_scope(stored_recipient) != "me":
             constraints.pop("size")
-    return constraints
+    return constraints, conflicts
 
 
 def recipient_scope(value):
@@ -438,7 +453,9 @@ def context(cur, turn, state):
     ).fetchall()
     text = turn["text"]
     brief = brief_in_use(cur, turn, state["brief"])
-    constraints = current_constraints(text, brief)
+    constraints, conflicts = request_constraints(text, brief)
+    if conflicts:
+        return None, brief, None, False
     projected_brief = brief if brief_matches_request(brief, text, constraints) else None
     eligible = [
         p
@@ -528,7 +545,9 @@ class BriefEvidenceError(BriefValidationError):
 def validate(raw, turn, brief, answer, *, require_gift_size=False):
     result = Result.model_validate_json(raw)
     text = turn["text"]
-    constraints = current_constraints(text, brief)
+    constraints, conflicts = request_constraints(text, brief)
+    if conflicts:
+        raise BriefEvidenceError("Conflicting request scope")
     existing_brief_eligible = brief_matches_request(brief, text, constraints)
     reply = result.reply.strip()
     if (

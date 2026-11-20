@@ -224,6 +224,9 @@ class AgentRunner:
             outcome, reply = "control", control
         elif harness.ACTION.search(text.strip()):
             outcome, reply = "transaction", harness.TRANSACTION
+        elif conflicts := harness.request_constraints(text)[1]:
+            outcome, reply = "fallback", harness.SCOPE_CLARIFICATIONS[conflicts]
+            reason = "scope_conflict"
         else:
             if at >= turn["inference_deadline"]:
                 reason = "inference_deadline"

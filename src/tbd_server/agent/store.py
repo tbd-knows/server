@@ -91,8 +91,9 @@ def transition(cur, user_id, mode, account, pairs, conversation=None):
     if mode == "agent":
         if not conversation or pairs.get(conversation) != user["phone"]:
             raise Problem(409, "Approved iMessage route required")
+        target_route = (account, user["phone"], conversation)
         if state:
-            replacing = route(state) != (account, user["phone"], conversation)
+            replacing = route(state) != target_route
             if replacing and approved(state, account, pairs):
                 raise Problem(409, "Retire the previous route before replacement")
             if cur.execute(
@@ -104,6 +105,17 @@ def transition(cur, user_id, mode, account, pairs, conversation=None):
                 (user_id, state["enrollment_id"], replacing),
             ).fetchone():
                 raise Problem(409, "Previous route still has unresolved delivery")
+        if cur.execute(
+            """SELECT 1 FROM agent_service.turns t
+            JOIN messaging.messages m ON m.reply_to_message_id=t.inbound_id
+            WHERE m.user_id=%s AND (m.account_ref,m.peer_ref,m.conversation_id)=(%s,%s,%s)
+              AND m.channel='imessage' AND m.direction='outbound' AND m.dedupe_key='reply:'||t.inbound_id::text
+              AND m.provider_message_id IS NULL AND m.state NOT IN ('sent','failed')
+              AND (m.state='uncertain' OR t.submission_possible OR t.delivery_grant IS NOT NULL)
+            LIMIT 1""",
+            (user_id, *target_route),
+        ).fetchone():
+            raise Problem(409, "This route still has unresolved delivery")
         cur.execute(
             """INSERT INTO agent_service.user_state
             (user_id,mode,enrollment_id,enrolled_at,account_ref,peer_ref,conversation_id)
@@ -111,7 +123,7 @@ def transition(cur, user_id, mode, account, pairs, conversation=None):
             ON CONFLICT (user_id) DO UPDATE SET mode='agent',enrollment_id=excluded.enrollment_id,
               enrolled_at=excluded.enrolled_at,account_ref=excluded.account_ref,peer_ref=excluded.peer_ref,
               conversation_id=excluded.conversation_id,brief=NULL,watermark=NULL""",
-            (user_id, uuid4(), account, user["phone"], conversation),
+            (user_id, uuid4(), *target_route),
         )
     else:
         if mode == "fixed" and cur.execute(HEAD, (user_id,)).fetchone():
