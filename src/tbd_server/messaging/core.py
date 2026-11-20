@@ -92,7 +92,7 @@ def queue_message(cur, user, route, text, dedupe_key, reply_to=None):
     return inserted
 
 
-def receive_message(cur, event: ReceivedMessage, activated_at: datetime):
+def receive_message(cur, event: ReceivedMessage, activated_at: datetime, *, agent_config=None):
     """Atomic admission, inbound and reply; caller commits before ACK."""
     # Serialize native identity even if a conflicting replay changes its peer.
     cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", ("inbound:" + event.native_id,))
@@ -143,6 +143,11 @@ def receive_message(cur, event: ReceivedMessage, activated_at: datetime):
             event.source_at,
         ),
     ).fetchone()
+    if agent_config is not None and not event.unsupported:
+        from tbd_server.agent.store import admit
+
+        if admit(cur, inbound, agent_config):
+            return inbound
     queue_message(
         cur,
         user,

@@ -13,6 +13,8 @@ import psycopg
 from psycopg.rows import dict_row
 from fastapi import Request
 
+from tbd_server.agent.adapter import OpenAI
+from tbd_server.agent.runner import AgentRunner, execution_config
 from tbd_server.user.store import Problem
 from .adapter import Comms, signed_event
 from .core import receive_message
@@ -20,7 +22,10 @@ from .runtime import DeliveryLoop, emit
 
 
 class Messaging:
-    def __init__(self, store, api_key, secret, account, activated_at, *, pilot_conversations=None, cards_enabled=False):
+    def __init__(
+        self, store, api_key, secret, account, activated_at, *, pilot_conversations=None, cards_enabled=False,
+        agent_model=None, agent_api_key=None,
+    ):
         if not api_key or not secret or not re.fullmatch(r"\+[1-9][0-9]{7,14}", account):
             raise ValueError("Messaging credentials and E.164 number required")
         self.activated_at = datetime.fromisoformat(activated_at.replace("Z", "+00:00"))
@@ -40,12 +45,18 @@ class Messaging:
         self.store, self.secret, self.account = store, secret, account
         self.adapter = Comms(api_key)
         self.cards_enabled = cards_enabled
+        self.agent_config = execution_config(agent_model)
+        self.runner = AgentRunner(
+            store.database_url, account, self.pilot_conversations, self.agent_config,
+            OpenAI(agent_api_key) if agent_model and agent_api_key else None,
+        )
         self.loop = DeliveryLoop(
             store.database_url,
             self.adapter,
             account,
             self.history_turn,
             card_pairs=self.pilot_conversations if cards_enabled else None,
+            agent_pairs=self.pilot_conversations,
         )
         self.next_sweep = 0.0
         # httpx INFO URLs include history phone query params. Disable those logs.
@@ -55,6 +66,8 @@ class Messaging:
     def verify_schema(self):
         with self.store.transaction() as cur:
             cur.execute("SELECT id,attempt_id,next_action_at FROM messaging.messages LIMIT 0")
+            cur.execute("SELECT inbound_id,delivery_suppressed FROM agent_service.turns LIMIT 0")
+            cur.execute("SELECT user_id,mode FROM agent_service.user_state LIMIT 0")
             if not cur.execute(
                 "SELECT has_table_privilege(current_user,'messaging.messages','INSERT') AS ok"
             ).fetchone()["ok"]:
@@ -99,9 +112,10 @@ class Messaging:
             raise Problem(503, "Messaging storage busy")
         try:
             with psycopg.connect(self.store.database_url, connect_timeout=1, row_factory=dict_row) as db:
+                db.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
                 db.execute("SET LOCAL statement_timeout='500ms'")
                 db.execute("SET LOCAL lock_timeout='500ms'")
-                row = receive_message(db.cursor(), event, self.activated_at)
+                row = receive_message(db.cursor(), event, self.activated_at, agent_config=self.agent_config)
                 if monotonic() - start > 3:
                     raise Problem(503, "Messaging storage deadline")
             emit(
@@ -182,7 +196,8 @@ class Messaging:
     async def lifespan(self, app):
         self.verify_schema()
         self.loop.start()
+        self.runner.start()
         try:
             yield
         finally:
-            await asyncio.to_thread(self.loop.stop)
+            await asyncio.gather(asyncio.to_thread(self.loop.stop), asyncio.to_thread(self.runner.stop))
