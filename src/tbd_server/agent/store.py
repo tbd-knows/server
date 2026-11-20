@@ -111,7 +111,8 @@ def transition(cur, user_id, mode, account, pairs, conversation=None):
             WHERE m.user_id=%s AND (m.account_ref,m.peer_ref,m.conversation_id)=(%s,%s,%s)
               AND m.channel='imessage' AND m.direction='outbound' AND m.dedupe_key='reply:'||t.inbound_id::text
               AND m.provider_message_id IS NULL AND m.state NOT IN ('sent','failed')
-              AND (m.state='uncertain' OR t.submission_possible OR t.delivery_grant IS NOT NULL)
+              AND (m.state='uncertain' OR t.submission_possible OR t.delivery_grant IS NOT NULL
+                   OR (m.state IN ('pending','sending') AND NOT t.delivery_suppressed))
             LIMIT 1""",
             (user_id, *target_route),
         ).fetchone():

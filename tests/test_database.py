@@ -2442,6 +2442,7 @@ def test_agent_db_repeated_model_eval(agent_pilot, monkeypatch):
     cases = []
     repeats = 3
     for index in range(repeats):
+        inbounds = []
         for label, body in COMMERCE_V1_CASES:
             records.clear()
             no_fit_outputs.clear()
@@ -2482,6 +2483,12 @@ def test_agent_db_repeated_model_eval(agent_pilot, monkeypatch):
             if label == "follow_up":
                 case["rendered_reply"] = reply
             cases.append(case)
+            inbounds.append(inbound)
+        if index < repeats - 1:
+            # Settle the replies before re-enrollment. Keeping delivery at the
+            # repeat boundary preserves the original within-repeat context.
+            for inbound in inbounds:
+                observe_agent_reply_sent(store, account, pairs, inbound, result)
         with store.transaction() as cur:
             saved = current_state(cur, users[0]["id"])["preferences"]
             metrics["privacy_or_state_failures"] += int(saved["shoes|me|condition"]["value"] != "new")
@@ -3021,7 +3028,8 @@ def test_agent_db_labeled_bearer_credential_stays_out_of_inference_and_history(a
     assert credential not in json.dumps(projected)
 
 
-def test_agent_db_item_switch_requires_replacement_and_cannot_bind_old_brief(agent_pilot):
+@pytest.mark.parametrize("comparison", ["Compare backpacks.", "Could you compare backpacks?"])
+def test_agent_db_item_switch_requires_replacement_and_cannot_bind_old_brief(agent_pilot, comparison):
     import json
 
     from tbd_server.agent.adapter import Generation
@@ -3067,18 +3075,19 @@ def test_agent_db_item_switch_requires_replacement_and_cannot_bind_old_brief(age
     shoes = brief()
     assert shoes["fields"]["budget"]["value"] == "$90"
 
-    invalid_update = intake(event("Compare backpacks for me. My budget is $50."))
+    request = comparison + " My budget is $50."
+    invalid_update = intake(event(request))
     assert runner.step()
     assert projected[1]["current_constraints"]["item"] == "backpacks" and projected[1]["brief"] is None
     assert result(invalid_update)[0]["outcome"] == "fallback" and brief() == shoes
 
-    unbound = intake(event("Compare backpacks. My budget is $50."))
+    unbound = intake(event(request))
     assert runner.step()
     turn, replies = result(unbound)
     assert turn["outcome"] == "model" and turn["question"] is None
     assert "What size" in replies[0]["text"] and brief() == shoes
 
-    replacement = intake(event("Compare backpacks. My budget is $50."))
+    replacement = intake(event(request))
     assert runner.step()
     turn, _ = result(replacement)
     assert turn["outcome"] == "model"
@@ -3188,7 +3197,11 @@ def test_agent_db_expired_delivery_keeps_account_quota_pause(agent_pilot):
     assert expired["state"] == "uncertain" and expired["attempt_count"] == 1
 
 
-def test_agent_db_quoted_bearer_credential_stays_out_of_inference_and_history(agent_pilot):
+@pytest.mark.parametrize(
+    "field,value",
+    [("Authorization", "Bearer synthetic-bearer-value"), ("password", "synthetic-password-value")],
+)
+def test_agent_db_quoted_credentials_stay_out_of_inference_and_history(agent_pilot, field, value):
     import json
 
     from tbd_server.agent.adapter import Generation
@@ -3197,7 +3210,7 @@ def test_agent_db_quoted_bearer_credential_stays_out_of_inference_and_history(ag
 
     _, _, _, _, runner, event, intake, result = agent_pilot
     prompts = []
-    credential = json.dumps({"Authorization": "Bearer tbd-review-fake-credential-0123456789"})
+    credential = json.dumps({field: value})
 
     async def provider(_, prompt, *__):
         prompts.append(json.loads(prompt))
@@ -3213,7 +3226,7 @@ def test_agent_db_quoted_bearer_credential_stays_out_of_inference_and_history(ag
     later = intake(event("Compare shoes"))
     assert runner.step() and result(later)[0]["outcome"] == "model"
     assert len(prompts) == 1 and prompts[0]["recent"] == []
-    assert "tbd-review-fake-credential" not in json.dumps(prompts)
+    assert value not in json.dumps(prompts)
 
 
 @pytest.mark.parametrize(
@@ -3266,9 +3279,13 @@ def test_agent_db_conflicting_brief_scope_prompts_locally(agent_pilot, ambiguous
     assert brief == shoes and brief["fields"]["budget"]["value"] == "$90"
 
 
-def test_agent_db_polite_order_request_and_false_confirmation(agent_pilot):
+@pytest.mark.parametrize("request_text", [
+    "Can you please order these for me?",
+    "Please go ahead and order these for me.",
+])
+def test_agent_db_order_request_stays_local(agent_pilot, request_text):
     from tbd_server.agent.adapter import Generation
-    from tbd_server.agent.harness import FALLBACK, TRANSACTION
+    from tbd_server.agent.harness import TRANSACTION
     from test_agent_harness import generated
 
     _, _, _, _, runner, event, intake, result = agent_pilot
@@ -3276,20 +3293,35 @@ def test_agent_db_polite_order_request_and_false_confirmation(agent_pilot):
 
     async def provider(_, prompt, *__):
         prompts.append(prompt)
-        return Generation(generated(reply="I have already placed the order."))
+        return Generation(generated())
 
     runner.adapter = provider
-    order = intake(event("Can you please order these for me?"))
+    order = intake(event(request_text))
     assert runner.step()
     turn, replies = result(order)
     assert turn["outcome"] == "transaction" and prompts == []
-    assert replies[0]["text"] == TRANSACTION
+    assert len(replies) == 1 and replies[0]["text"] == TRANSACTION
 
+
+@pytest.mark.parametrize("reply", ["I have already placed the order.", "I’ve submitted your order."])
+def test_agent_db_rejects_false_order_confirmation(agent_pilot, reply):
+    from tbd_server.agent.adapter import Generation
+    from tbd_server.agent.harness import FALLBACK
+    from test_agent_harness import generated
+
+    _, _, _, _, runner, event, intake, result = agent_pilot
+    prompts = []
+
+    async def provider(_, prompt, *__):
+        prompts.append(prompt)
+        return Generation(generated(reply=reply))
+
+    runner.adapter = provider
     comparison = intake(event("Compare these shoes"))
     assert runner.step()
     turn, replies = result(comparison)
     assert len(prompts) == 1 and turn["outcome"] == "fallback"
-    assert replies[0]["text"] == FALLBACK
+    assert len(replies) == 1 and replies[0]["text"] == FALLBACK
 
 
 def test_agent_db_reapproval_checks_older_unresolved_sends_by_exact_route(agent_pilot):
@@ -3304,9 +3336,12 @@ def test_agent_db_reapproval_checks_older_unresolved_sends_by_exact_route(agent_
     assert runner.step()
     first_enrollment = result(first)[0]["enrollment_id"]
     with store.transaction() as cur:
-        transition(cur, user_id, "fallback", account, pairs)
-        transition(cur, user_id, "fixed", account, pairs)
-        transition(cur, user_id, "agent", account, pairs, "agent_a")
+        # Simulate a re-enrollment from the earlier release, which permitted
+        # reopening the route before its pending reply had been attempted.
+        cur.execute(
+            "UPDATE agent_service.user_state SET enrollment_id=%s WHERE user_id=%s",
+            (uuid4(), user_id),
+        )
         assert current_state(cur, user_id)["enrollment_id"] != first_enrollment
         job = claim(cur, account)
         assert job["reply_to_message_id"] == first["id"]
@@ -3476,3 +3511,130 @@ def test_agent_db_paid_brief_scope_transition(agent_pilot):
     )
     assert carry_used and switch_used
     assert old_brief_excluded and old_question_excluded and old_brief_preserved
+
+
+def test_agent_db_reapproval_waits_for_unsuppressed_pending_reply(agent_pilot):
+    from time import monotonic
+    from unittest.mock import Mock
+
+    from tbd_server.agent.store import transition
+    from tbd_server.messaging.adapter import SendResult
+    from tbd_server.messaging.runtime import DeliveryLoop
+
+    store, account, users, pairs, runner, event, intake, result = agent_pilot
+    user_id = users[0]["id"]
+    old = intake(event("Compare shoes"))
+    assert runner.step()
+    assert result(old)[1][0]["state"] == "pending"
+    retired = {key: value for key, value in pairs.items() if key != "agent_a"}
+    with store.transaction() as cur:
+        transition(cur, user_id, "fallback", account, retired)
+        transition(cur, user_id, "fixed", account, retired)
+
+    with pytest.raises(Problem, match="unresolved delivery"):
+        with store.transaction() as cur:
+            transition(cur, user_id, "agent", account, pairs, "agent_a")
+
+    provider = Mock()
+    provider.send.return_value = SendResult("sent", "synthetic-after-reapproval", observed_status="sent")
+    loop = DeliveryLoop(store.database_url, provider, account, lambda *_: False, agent_pairs=retired)
+    with psycopg.connect(store.database_url, autocommit=True, row_factory=psycopg.rows.dict_row) as db:
+        loop.turn(db)
+        provider.send.assert_not_called()
+        old_turn, old_replies = result(old)
+        assert old_turn["delivery_suppressed"]
+        assert old_replies[0]["state"] == "failed" and old_replies[0]["attempt_count"] == 0
+
+        with store.transaction() as cur:
+            transition(cur, user_id, "agent", account, pairs, "agent_a")
+        reopened = intake(event("Compare backpacks"))
+        assert runner.step()
+        loop.agent_pairs = pairs
+        loop.category = 1
+        loop.last_send = monotonic() - 2
+        loop.turn(db)
+
+    provider.send.assert_called_once()
+    assert provider.send.call_args.args[0]["reply_to_message_id"] == reopened["id"]
+    assert result(reopened)[1][0]["state"] == "sent"
+    assert result(old)[1][0]["attempt_count"] == 0
+
+
+@pytest.mark.parametrize("proposal", ["unseen", "unchanged", "update", "replace_with_size", "replace"])
+def test_agent_db_visible_recipient_switch_needs_clean_replacement(agent_pilot, proposal):
+    import json
+    from time import sleep
+
+    from tbd_server.agent import harness
+    from tbd_server.agent.adapter import Generation
+    from tbd_server.agent.store import current_state
+    from test_agent_harness import generated
+
+    store, account, users, pairs, runner, event, intake, result = agent_pilot
+    prompts = []
+    seed = generated(
+        brief="update",
+        edits=[
+            {"field": "item", "value": "shoes"},
+            {"field": "size", "value": "8"},
+            {"field": "budget", "value": "$90"},
+            {"field": "option", "value": "Aspen costs $80"},
+        ],
+        question={"field": "recipient", "value": None},
+    )
+    recipient = {"field": "recipient", "value": "my sister"}
+    replacement = [{"field": "item", "value": "shoes"}, recipient]
+    mode, edits = {
+        "unseen": ("unchanged", []),
+        "unchanged": ("unchanged", []),
+        "update": ("update", [recipient]),
+        "replace_with_size": ("replace", [*replacement, {"field": "size", "value": "8"}]),
+        "replace": ("replace", replacement),
+    }[proposal]
+    response = generated(
+        brief=mode,
+        edits=edits,
+        question={"field": "size", "value": None},
+    )
+    outputs = iter([seed, response])
+
+    async def provider(_, prompt, *__):
+        prompts.append(json.loads(prompt))
+        return Generation(next(outputs))
+
+    runner.adapter = provider
+    original = intake(event("Compare shoes. My size is 8. My budget is $90. Aspen costs $80."))
+    assert runner.step()
+    with store.transaction() as cur:
+        personal = current_state(cur, users[0]["id"])["brief"]
+    assert result(original)[0]["question"]["field"] == "recipient"
+    if proposal != "unseen":
+        observed = observe_agent_reply_sent(store, account, pairs, original, result)
+        sleep(harness.SKEW.total_seconds())
+
+    answer = intake(event("my sister"))
+    if proposal != "unseen":
+        assert harness.visible(observed, answer)
+    assert runner.step()
+    turn, replies = result(answer)
+    assert len(replies) == 1
+    with store.transaction() as cur:
+        brief = current_state(cur, users[0]["id"])["brief"]
+
+    if proposal == "unseen":
+        assert len(prompts) == 1 and replies[0]["text"] == harness.RESTATEMENT
+    else:
+        assert len(prompts) == 2
+        assert prompts[1]["brief"] is None and prompts[1]["recent"] == []
+        assert prompts[1]["typed_answer"] == {"recipient": "my sister", "item": "shoes"}
+
+    if proposal == "replace":
+        assert turn["outcome"] == "model" and brief["id"] == str(answer["id"])
+        assert {field: entry["value"] for field, entry in brief["fields"].items()} == {
+            "item": "shoes", "recipient": "my sister",
+        }
+        assert brief["options"] == []
+        assert turn["question"] == {"brief_id": brief["id"], "field": "size", "value": None}
+    else:
+        assert brief == personal and turn["question"] is None
+        assert turn["outcome"] == ("model" if proposal == "unchanged" else "fallback")

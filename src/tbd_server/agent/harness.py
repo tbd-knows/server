@@ -23,7 +23,7 @@ KEYS = ("size", "fit", "condition", "brand", "material")
 SECRET = re.compile(
     r"\b(?:card (?:number|details)|credit card|debit card|cvv|cvc|security code|password|passcode|"
     r"one[- ]time (?:code|password)|verification code|otp|api[ _-]?key|access token|"
-    r"secret key|private key|recovery phrase|pin)\s*(?:is\s+|[:=]\s*|\s+)\S+"
+    r"""secret key|private key|recovery phrase|pin)["']?\s*(?:is\s+|[:=]\s*|\s+)\S+"""
     r"""|\bauthorization["']?\s*:\s*["']?bearer\s+[^\s"']+"""
     r"|\b(?:sk-(?:proj-)?|gh[pousr]_|github_pat_|xox[baprs]-)[a-zA-Z0-9_-]{12,}"
     r"|-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----"
@@ -31,7 +31,7 @@ SECRET = re.compile(
     re.I,
 )
 ACTION = re.compile(
-    r"^(?:please\s+)?(?:(?:can|could) you\s+(?:please\s+)?)?(?:"
+    r"^(?:please\s+)?(?:(?:can|could) you\s+(?:please\s+)?)?(?:go ahead and\s+)?(?:"
     r"(?:buy|purchase|order|pay(?: for)?|checkout|place (?:an |the |my )?order)\b"
     r"|(?:check|verify|track|confirm)\b.{0,40}\b(?:order|payment|shipping|delivery|status)\b"
     r"|(?:where is|what(?: is|'s)|did|has|is)\b.{0,40}\b(?:order|payment|package)\b"
@@ -46,7 +46,7 @@ MEMORY = re.compile(
     re.I,
 )
 SHOPPING_REQUEST = re.compile(
-    r"^(?:please )?(?:compare|find|show|recommend|help me (?:find|compare|choose)|"
+    r"^(?:(?:can|could) you\s+)?(?:please\s+)?(?:compare|find|show|recommend|help me (?:find|compare|choose)|"
     r"i (?:need|want)|i[’']m (?:also )?looking for|shopping for|switch to)\s+",
     re.I,
 )
@@ -54,6 +54,7 @@ RECIPIENT = re.compile(
     r"\b(?i:for) ((?i:me|myself|someone(?: else)?|(?:my|a|an|our|the) [\w-]+(?: [\w-]+)*?)"
     r"|[A-Z][\w-]*(?: [A-Z][\w-]*)*)(?=$|[,:.!?]|\s+(?i:with|under|by|and|in size)\b)"
 )
+RECIPIENT_ANSWER = r"(?:my |for my )(?:self|partner|friend|child|mom|dad|sister|brother)|me|myself"
 PRICE = r"(\$\s?\d[\d,]*(?:\.\d{2})?)"
 SIZE = r"(\d{1,3}(?:\.\d{1,2})?(?:\s*(?:us|uk|eu|wide))?|xxxs|xxs|xs|s|m|l|xl|xxl|xxxl)"
 RECIPIENT_SIZE = re.compile(
@@ -86,7 +87,7 @@ CONSTRAINTS = {
 }
 FALSE_CONFIRMATION = re.compile(
     r"\b(?:I|we)(?: (?:have )?|[’']ve )(?:already |just )?"
-    r"(?:saved|forgot|ordered|purchased|bought|paid|verified|placed (?:an|the|your|this) order)\b"
+    r"(?:saved|forgot|ordered|purchased|bought|paid|verified|(?:placed|submitted) (?:an|the|your|this) order)\b"
     r"|\b(?:order|payment) (?:is |was |has been )?(?:confirmed|completed|placed|verified)\b",
     re.I,
 )
@@ -259,9 +260,11 @@ def typed_answer(text, question, brief):
         "condition": r"new|used|like new|refurbished|secondhand",
         "fit": r"slim|regular|relaxed|wide|narrow|loose|oversized",
         "material": r"cotton|linen|wool|leather|silk|polyester|nylon|denim|suede",
-        "recipient": r"(?:my |for my )(?:self|partner|friend|child|mom|dad|sister|brother)|me|myself",
+        "recipient": RECIPIENT_ANSWER,
     }
     if field in patterns and re.fullmatch(patterns[field], answer, re.I):
+        if field == "recipient" and answer.casefold().startswith("for "):
+            answer = answer[4:]
         return {field: answer}
     if field == "brand" and (match := re.fullmatch(r"brand[: ]+([\w -]{1,48})", answer, re.I)):
         return {field: match[1]}
@@ -332,7 +335,7 @@ def request_constraints(text, brief=None):
         if len(sizes) == 1:
             constraints["size"] = next(iter(sizes.values()))
     elif not recipient and "size" in constraints and brief_matches_request(brief, text, constraints):
-        stored_recipient = brief["fields"].get("recipient", {}).get("value", "me")
+        stored_recipient = brief_recipient(brief)
         if recipient_scope(stored_recipient) != "me":
             constraints.pop("size")
     return constraints, conflicts
@@ -355,13 +358,25 @@ def brief_item_matches(brief, constraints):
     return item is None or item.casefold() == stored.casefold()
 
 
+def brief_recipient(brief):
+    return brief["fields"].get("recipient", {}).get("value", "me")
+
+
+def scoped_answer(brief, answer):
+    recipient = (answer or {}).get("recipient")
+    if brief and recipient and recipient_scope(recipient) != recipient_scope(brief_recipient(brief)):
+        # A verified recipient answer can reuse the subject of its question.
+        # The different recipient makes all other brief fields ineligible.
+        return {**answer, "item": brief["fields"]["item"]["value"]}
+    return answer
+
+
 def brief_matches_request(brief, text, constraints):
     if brief is None or unclear_recipient(text, constraints) or re.search(r"\b(?:switch|instead)\b", text, re.I):
         return False
     recipient = constraints.get("recipient")
-    stored = brief["fields"].get("recipient", {}).get("value", "me")
     return brief_item_matches(brief, constraints) and (
-        recipient is None or recipient_scope(recipient) == recipient_scope(stored)
+        recipient is None or recipient_scope(recipient) == recipient_scope(brief_recipient(brief))
     )
 
 
@@ -456,7 +471,6 @@ def context(cur, turn, state):
     constraints, conflicts = request_constraints(text, brief)
     if conflicts:
         return None, brief, None, False
-    projected_brief = brief if brief_matches_request(brief, text, constraints) else None
     eligible = [
         p
         for p in previous
@@ -467,10 +481,15 @@ def context(cur, turn, state):
     ]
     answer = None
     if previous and eligible and previous[0] is eligible[0] and visible(previous[0], turn):
-        answer = typed_answer(text, previous[0]["question"], projected_brief)
+        answer = scoped_answer(brief, typed_answer(text, previous[0]["question"], brief))
+    scope = {**(answer or {}), **constraints}
+    projected_brief = brief if brief_matches_request(brief, text, scope) else None
+    if projected_brief is None and "recipient" not in (answer or {}):
+        answer = None
     # Pure acknowledgments and isolated values require the immediately prior question.
     isolated = re.fullmatch(
-        r"(?:yes(?: please)?|no(?: thanks)?|correct|sure|size [\w.]+|[\d.]+|\$[\d,.]+|XS|S|M|L|XL|XXL)",
+        r"(?:yes(?: please)?|no(?: thanks)?|correct|sure|size [\w.]+|[\d.]+|\$[\d,.]+|XS|S|M|L|XL|XXL|"
+        + RECIPIENT_ANSWER + r")",
         text.strip().rstrip(".!?"),
         re.I,
     )
@@ -485,22 +504,25 @@ def context(cur, turn, state):
     current = brief["fields"] if brief else {}
     existing_item = current.get("item", {}).get("value", "").casefold()
     existing_person = recipient_scope(current.get("recipient", {}).get("value", "me"))
-    recipient = constraints.get("recipient")
+    recipient = scope.get("recipient")
     explicit_recipient = recipient_scope(recipient) if recipient else None
-    if not state["paused"] and not unclear_recipient(text, constraints):
-        for scope, entry in state["preferences"].items():
-            item, person, key = scope.split("|")
+    if not state["paused"] and not unclear_recipient(text, scope):
+        for preference_scope, entry in state["preferences"].items():
+            item, person, key = preference_scope.split("|")
             recipient_for_item = explicit_recipient or (existing_person if item == existing_item else "me")
             explicit_scope = scope_mentioned(item, normalized) and person == recipient_for_item
             continuing_scope = projected_brief is not None and (item, person) == (existing_item, existing_person)
             if (explicit_scope or continuing_scope) and not SECRET.search(entry["value"]):
                 preferences.append({"item": item, "recipient": person, "key": key, "value": entry["value"]})
-    recent = [
-        {"user": p["text"], "reply": p["reply"] if p["outcome"] == "model" and visible(p, turn) else None}
-        for p in reversed(eligible)
-    ]
+    recent = []
+    # A recipient switch carries the answered scope, without the prior recipient's chat.
+    if "item" not in (answer or {}):
+        recent = [
+            {"user": p["text"], "reply": p["reply"] if p["outcome"] == "model" and visible(p, turn) else None}
+            for p in reversed(eligible)
+        ]
     reply_size = gift_size_for_reply(text, constraints)
-    require_gift_size = needs_gift_size(text, constraints, projected_brief, answer, preferences, reply_size=reply_size)
+    require_gift_size = needs_gift_size(text, scope, projected_brief, answer, preferences, reply_size=reply_size)
     payload = {
         "current": text,
         "current_constraints": constraints,
@@ -548,7 +570,9 @@ def validate(raw, turn, brief, answer, *, require_gift_size=False):
     constraints, conflicts = request_constraints(text, brief)
     if conflicts:
         raise BriefEvidenceError("Conflicting request scope")
-    existing_brief_eligible = brief_matches_request(brief, text, constraints)
+    answer = scoped_answer(brief, answer)
+    scope = {**(answer or {}), **constraints}
+    existing_brief_eligible = brief_matches_request(brief, text, scope)
     reply = result.reply.strip()
     if (
         not reply
@@ -573,8 +597,8 @@ def validate(raw, turn, brief, answer, *, require_gift_size=False):
         if (
             result.brief == "replace"
             and brief
-            and brief_item_matches(brief, constraints)
-            and "recipient" not in constraints
+            and brief_item_matches(brief, scope)
+            and "recipient" not in scope
             and not re.search(
                 r"\b(?:instead|switch|new|different|now (?:I|look|find)|for my|for me|gift"
                 r"|(?:I need|I want|I’m looking for|I'm looking for|shopping for))\b",
@@ -583,7 +607,7 @@ def validate(raw, turn, brief, answer, *, require_gift_size=False):
             )
         ):
             raise BriefValidationError("Missing switch evidence")
-        recipient = constraints.get("recipient")
+        recipient = scope.get("recipient")
         if brief and result.brief == "update" and not existing_brief_eligible:
             raise BriefEvidenceError("The current request cannot edit this brief")
         brief = (
@@ -626,10 +650,8 @@ def validate(raw, turn, brief, answer, *, require_gift_size=False):
                     raise BriefValidationError("Use a replacement for a different item or recipient")
                 brief["fields"][edit.field] = evidence
                 seen.add(edit.field)
-        if recipient:
-            stored_recipient = brief["fields"].get("recipient", {}).get("value", "me")
-            if recipient_scope(stored_recipient) != recipient_scope(recipient):
-                raise BriefEvidenceError("Missing recipient evidence in brief", "recipient")
+        if recipient and recipient_scope(brief_recipient(brief)) != recipient_scope(recipient):
+            raise BriefEvidenceError("Missing recipient evidence in brief", "recipient")
         if result.edits:
             brief["activity_at"] = turn["source_at"].isoformat()
         if "item" not in brief["fields"] or len(brief["options"]) > 8:
