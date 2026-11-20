@@ -2479,6 +2479,8 @@ def test_agent_db_repeated_model_eval(agent_pilot, monkeypatch):
             }
             if label == "no_fit":
                 case["output_structure"] = list(no_fit_outputs)
+            if label == "follow_up":
+                case["rendered_reply"] = reply
             cases.append(case)
         with store.transaction() as cur:
             saved = current_state(cur, users[0]["id"])["preferences"]
@@ -2704,6 +2706,23 @@ def test_agent_db_local_watermark_cannot_revive_expired_brief(agent_pilot, legac
     assert prompts[1]["brief"] is None
 
 
+def observe_agent_reply_sent(store, account, pairs, inbound, result):
+    from tbd_server.agent.delivery import authorize_post
+    from tbd_server.messaging.adapter import SendResult
+    from tbd_server.messaging.runtime import claim, record_send_result
+
+    with store.transaction() as cur:
+        job = claim(cur, account)
+        assert job["reply_to_message_id"] == inbound["id"]
+    with store.transaction() as cur:
+        assert authorize_post(cur, job, account, pairs) is not None
+    with store.transaction() as cur:
+        assert record_send_result(
+            cur, job["id"], job["attempt_id"],
+            SendResult("sent", str(uuid4()), observed_status="sent"), agent_guard=True,
+        )
+    return result(inbound)[1][0]
+
 def test_agent_db_observed_gift_question_cannot_change_personal_brief(agent_pilot):
     from datetime import datetime, timezone
     import json
@@ -2711,10 +2730,7 @@ def test_agent_db_observed_gift_question_cannot_change_personal_brief(agent_pilo
 
     from tbd_server.agent import harness
     from tbd_server.agent.adapter import Generation
-    from tbd_server.agent.delivery import authorize_post
     from tbd_server.agent.store import current_state
-    from tbd_server.messaging.adapter import SendResult
-    from tbd_server.messaging.runtime import claim, record_send_result
     from test_agent_harness import generated
 
     store, account, users, pairs, runner, event, intake, result = agent_pilot
@@ -2729,23 +2745,10 @@ def test_agent_db_observed_gift_question_cannot_change_personal_brief(agent_pilo
         prompts.append(json.loads(prompt))
         return Generation(next(outputs))
 
-    def observe_sent(inbound):
-        with store.transaction() as cur:
-            job = claim(cur, account)
-            assert job["reply_to_message_id"] == inbound["id"]
-        with store.transaction() as cur:
-            assert authorize_post(cur, job, account, pairs) is not None
-        with store.transaction() as cur:
-            assert record_send_result(
-                cur, job["id"], job["attempt_id"],
-                SendResult("sent", str(uuid4()), observed_status="sent"), agent_guard=True,
-            )
-        return result(inbound)[1][0]
-
     runner.adapter = model
     own = intake(event("Compare shoes for me. I need size 8."))
     assert runner.step() and result(own)[0]["outcome"] == "model"
-    observe_sent(own)
+    observe_agent_reply_sent(store, account, pairs, own, result)
     with store.transaction() as cur:
         before = current_state(cur, users[0]["id"])["brief"]
     assert before["fields"]["size"]["value"] == "8"
@@ -2753,7 +2756,7 @@ def test_agent_db_observed_gift_question_cannot_change_personal_brief(agent_pilo
     gift = intake(event("Compare these shoes for a friend"))
     assert runner.step()
     assert prompts[1]["brief"] is None
-    observed = observe_sent(gift)
+    observed = observe_agent_reply_sent(store, account, pairs, gift, result)
     assert "What size" in observed["text"]
     assert observed["sent_observed_at"] is not None
     sleep(harness.SKEW.total_seconds())
@@ -2766,6 +2769,91 @@ def test_agent_db_observed_gift_question_cannot_change_personal_brief(agent_pilo
     assert result(gift)[0]["question"] is None
     assert result(answer)[1][0]["text"] == harness.RESTATEMENT
     assert len(prompts) == 2
+
+
+@pytest.mark.parametrize("bind_question", [False, True])
+def test_agent_db_gift_size_required_until_recipient_size_is_known(agent_pilot, bind_question):
+    import json
+    from time import sleep
+
+    from tbd_server.agent import harness
+    from tbd_server.agent.adapter import Generation
+    from tbd_server.agent.store import current_state
+    from test_agent_harness import generated
+
+    store, account, users, pairs, runner, event, intake, result = agent_pilot
+    prompts = []
+    gift_edits = [
+        {"field": "item", "value": "shoes"}, {"field": "recipient", "value": "my sister"},
+        {"field": "option", "value": "Maple is size 8"}, {"field": "option", "value": "Oak is size 10"},
+    ]
+    outputs = iter([
+        generated(brief="update", edits=[{"field": "item", "value": "shoes"}, {"field": "size", "value": "8"}]),
+        generated(
+            reply="I would pick Maple because it fits your size.",
+            brief="replace" if bind_question else "unchanged", edits=gift_edits if bind_question else [],
+        ),
+        generated(
+            reply="I would pick Oak because it matches her size 10.",
+            brief="update" if bind_question else "unchanged",
+            edits=[{"field": "size", "value": "10"}] if bind_question else [],
+        ),
+    ])
+
+    async def model(_, prompt, *__):
+        prompts.append(json.loads(prompt))
+        return Generation(next(outputs))
+
+    runner.adapter = model
+    own = intake(event("Compare shoes for me. I need size 8."))
+    assert runner.step() and result(own)[0]["outcome"] == "model"
+    if bind_question:
+        observe_agent_reply_sent(store, account, pairs, own, result)
+    with store.transaction() as cur:
+        personal = current_state(cur, users[0]["id"])["brief"]
+
+    gift = intake(event(dict(COMMERCE_V1_CASES)["follow_up"]))
+    assert runner.step()
+    assert prompts[1]["brief"] is None and prompts[1]["preferences"] == []
+    assert prompts[1]["required_question"] == {"field": "size", "value": None}
+    turn, replies = result(gift)
+    assert turn["outcome"] == "model" and len(replies) == 1
+    assert replies[0]["text"].startswith("What size does the recipient wear?")
+    assert "Maple" not in replies[0]["text"] and "Oak" not in replies[0]["text"]
+    with store.transaction() as cur:
+        current_brief = current_state(cur, users[0]["id"])["brief"]
+    if bind_question:
+        assert turn["question"] == {"brief_id": current_brief["id"], "field": "size", "value": None}
+        assert current_brief["id"] != personal["id"]
+        assert current_brief["fields"]["recipient"]["value"] == "my sister"
+        observe_agent_reply_sent(store, account, pairs, gift, result)
+        sleep(harness.SKEW.total_seconds())
+        supplied = "10"
+    else:
+        assert turn["question"] is None and current_brief == personal
+        supplied = "My sister wears size 10. Which fits?"
+
+    answer = intake(event(supplied))
+    assert runner.step()
+    assert prompts[2]["required_question"] is None
+    if bind_question:
+        assert prompts[2]["typed_answer"] == {"size": "10"}
+        assert prompts[2]["brief"]["options"] == [
+            {"value": edit["value"], "source": str(gift["id"])} for edit in gift_edits if edit["field"] == "option"
+        ]
+    else:
+        assert prompts[2]["current_constraints"]["size"] == "10"
+        assert prompts[2]["brief"] is None
+        assert any(row["user"] == gift["text"] for row in prompts[2]["recent"])
+    turn, replies = result(answer)
+    assert turn["outcome"] == "model" and turn["question"] is None
+    assert replies[0]["text"] == "I would pick Oak because it matches her size 10."
+    with store.transaction() as cur:
+        after = current_state(cur, users[0]["id"])["brief"]
+    if bind_question:
+        assert after["fields"]["size"]["value"] == "10"
+    else:
+        assert after == personal
 
 
 @pytest.mark.parametrize("response,expected", [

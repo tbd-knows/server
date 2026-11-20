@@ -82,7 +82,7 @@ def test_both_times_must_show_reply_before_typed_answer(source_shift, created_sh
     inbound["created_at"] += timedelta(seconds=created_shift)
     cur = Mock()
     cur.execute.return_value.fetchall.return_value = [parent]
-    prompt, _, answer = harness.context(cur, inbound, active)
+    prompt, _, answer, _ = harness.context(cur, inbound, active)
     assert bool(prompt) == expected
     assert answer == ({"size": "9"} if expected else None)
 
@@ -137,7 +137,7 @@ def test_full_prompt_budget_and_optional_context_trimming():
             "reply": "Exclude me",
         }
     ]
-    prompt, _, _ = harness.context(cur, inbound, state(inbound))
+    prompt, _, _, _ = harness.context(cur, inbound, state(inbound))
     assert json.loads(prompt)["recent"] == []
     inbound["text"] *= harness.PROMPT_BYTES
     assert harness.context(cur, inbound, state(inbound))[0] is None
@@ -161,16 +161,16 @@ def test_scoped_preferences_and_gift_exception():
     cur = Mock()
     cur.execute.return_value.fetchall.return_value = []
     inbound["text"] += " and tell me what fits"
-    prompt, _, _ = harness.context(cur, inbound, active)
+    prompt, _, _, _ = harness.context(cur, inbound, active)
     assert json.loads(prompt)["brief"] is None
     assert json.loads(prompt)["preferences"] == [
         {"item": "shoes", "recipient": "sister", "key": "material", "value": "cotton"},
     ]
     active["brief"]["fields"]["recipient"] = {"value": "my sister"}
-    prompt, _, _ = harness.context(cur, inbound, active)
+    prompt, _, _, _ = harness.context(cur, inbound, active)
     assert json.loads(prompt)["brief"]["id"] == "opening"
     inbound["text"] = "Which shoes would be warmer?"
-    prompt, _, _ = harness.context(cur, inbound, active)
+    prompt, _, _, _ = harness.context(cur, inbound, active)
     assert [p["recipient"] for p in json.loads(prompt)["preferences"]] == ["sister"]
 
 
@@ -336,7 +336,7 @@ def test_gift_to_a_friend_excludes_self_preferences_and_brief():
     active["preferences"] = {"shoes|me|size": {"value": "8"}}
     cur = Mock()
     cur.execute.return_value.fetchall.return_value = []
-    prompt, original_brief, _ = harness.context(cur, inbound, active)
+    prompt, original_brief, _, _ = harness.context(cur, inbound, active)
     projected = json.loads(prompt)
     assert projected["brief"] is None and projected["preferences"] == []
     assert projected["current_constraints"]["recipient"] == "a friend"
@@ -377,9 +377,63 @@ def test_brief_expiry_uses_accepted_edit_time_and_read_only_turn_does_not_renew(
     }
     cur = Mock()
     cur.execute.return_value.fetchall.return_value = []
-    prompt, brief, _ = harness.context(cur, inbound, active)
+    prompt, brief, _, _ = harness.context(cur, inbound, active)
     assert brief is None and json.loads(prompt)["brief"] is None
     active["brief"]["activity_at"] = active["watermark"].isoformat()
-    _, usable, _ = harness.context(cur, inbound, active)
+    _, usable, _, _ = harness.context(cur, inbound, active)
     _, unchanged, _ = harness.validate(generated(), inbound, usable, None)
     assert unchanged == active["brief"]
+
+
+def test_gift_size_guard_is_limited_to_unresolved_fit_choices():
+    text = "Compare shoes for my sister. Maple is size 8. Oak is size 10. Which fits?"
+    assert harness.needs_gift_size(text, harness.current_constraints(text), None, None, [])
+    own_size = text + " My size is 8."
+    assert harness.needs_gift_size(own_size, harness.current_constraints(own_size), None, None, [])
+    explicit_size = text + " My sister wears size 10."
+    assert not harness.needs_gift_size(explicit_size, harness.current_constraints(explicit_size), None, None, [])
+    sister_size = {"item": "shoes", "recipient": "sister", "key": "size", "value": "10"}
+    assert not harness.needs_gift_size(text, harness.current_constraints(text), None, None, [sister_size])
+    other_choice = text.replace("Which fits?", "Which one is cheaper?")
+    assert not harness.needs_gift_size(other_choice, harness.current_constraints(other_choice), None, None, [])
+    self_shopping = text.replace("my sister", "me")
+    assert not harness.needs_gift_size(self_shopping, harness.current_constraints(self_shopping), None, None, [])
+    same_size = text.replace("size 10", "size 8")
+    assert not harness.needs_gift_size(same_size, harness.current_constraints(same_size), None, None, [])
+    gift_brief = {"fields": {"recipient": {"value": "my sister"}}, "options": []}
+    assert "size" not in harness.current_constraints("My size is 8. Which fits?", gift_brief)
+
+
+@pytest.mark.parametrize(
+    "premature_reply",
+    [
+        "For your sister, Maple is the better fit if her shoe size is 8. "
+        "Oak is size 10, so it would likely be too large.",
+        "For your sister, Maple fits better if she wears size 8. "
+        "Oak is size 10, so it would likely be too large. "
+        "If you want, I can also help compare based on condition or budget.",
+    ],
+)
+def test_paid_gift_replay_misses_render_an_open_recipient_size_question(premature_reply):
+    inbound = turn("Switch to a gift of shoes for my sister. Maple is size 8. Oak is size 10. Which fits?")
+    active = state(inbound)
+    active["brief"] = {
+        "id": str(uuid4()),
+        "fields": {"item": {"value": "shoes"}, "size": {"value": "8"}},
+        "options": [],
+        "activity_at": inbound["source_at"].isoformat(),
+    }
+    cur = Mock()
+    cur.execute.return_value.fetchall.return_value = []
+    prompt, brief, answer, require_gift_size = harness.context(cur, inbound, active)
+    assert json.loads(prompt)["brief"] is None and require_gift_size
+    reply, saved, question = harness.validate(
+        generated(reply=premature_reply),
+        inbound,
+        brief,
+        answer,
+        require_gift_size=require_gift_size,
+    )
+    assert reply.startswith("What size does the recipient wear?")
+    assert "Maple" not in reply and "Oak" not in reply
+    assert saved == active["brief"] and question is None

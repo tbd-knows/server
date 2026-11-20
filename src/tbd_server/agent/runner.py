@@ -20,7 +20,7 @@ from .store import HEAD, approved, current_state, finish, lock_user, now, route
 def execution_config(model):
     return {
         "model": model,
-        "prompt": 3,
+        "prompt": 4,
         "schema": 1,
         "deadline": 24,
         "lease": 10,
@@ -133,7 +133,7 @@ class AgentRunner:
         # Assemble and grant in separate transactions to recheck all fences
         # after context work. An unconfirmed grant never reaches the provider.
         with self.transaction() as cur:
-            prompt, brief, answer = harness.context(cur, turn, state)
+            prompt, brief, answer, require_gift_size = harness.context(cur, turn, state)
         if prompt is None:
             self.complete(turn, token, Generation(), brief, answer, local=True)
             return True
@@ -174,7 +174,7 @@ class AgentRunner:
             usage=result.usage,
             reason=result.reason,
         )
-        self.complete(turn, token, result, brief, answer)
+        self.complete(turn, token, result, brief, answer, require_gift_size=require_gift_size)
         return True
 
     @staticmethod
@@ -237,7 +237,7 @@ class AgentRunner:
         finish(cur, turn, state, outcome, reply, fresh=fresh)
         return outcome, reason
 
-    def complete(self, turn, token, result, brief, answer, *, local=False):
+    def complete(self, turn, token, result, brief, answer, *, local=False, require_gift_size=False):
         started = monotonic()
         outcome = "fallback"
         reply = harness.RESTATEMENT if local else harness.FALLBACK
@@ -246,7 +246,13 @@ class AgentRunner:
         reason = "context_restatement" if local else result.reason or "provider_unreadable"
         if result.output is not None:
             try:
-                reply, brief, target = harness.validate(result.output, turn, brief, answer)
+                reply, brief, target = harness.validate(
+                    result.output,
+                    turn,
+                    brief,
+                    answer,
+                    require_gift_size=require_gift_size,
+                )
                 outcome, reason = "model", None
             except ValidationError as exc:
                 errors = exc.errors(include_input=False, include_context=False, include_url=False)

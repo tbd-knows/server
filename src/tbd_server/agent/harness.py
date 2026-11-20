@@ -55,6 +55,16 @@ RECIPIENT = re.compile(
 )
 PRICE = r"(\$\s?\d[\d,]*(?:\.\d{2})?)"
 SIZE = r"(\d{1,3}(?:\.\d{1,2})?(?:\s*(?:us|uk|eu|wide))?|xxxs|xxs|xs|s|m|l|xl|xxl|xxxl)"
+RECIPIENT_SIZE = re.compile(
+    r"(my [\w-]+)(?: (?:wears|takes|needs) (?:a )?size|[’']s (?:shoe )?size(?: is|:))\s+" + SIZE,
+    re.I,
+)
+SIZE_MENTION = re.compile(r"\bsize\s+" + SIZE + r"\b", re.I)
+FIT_CHOICE = re.compile(
+    r"\b(?:fits?|which (?:one |pair )?(?:should|would) (?:i|you) (?:choose|pick|get|buy)|"
+    r"help me (?:choose|pick))\b",
+    re.I,
+)
 CONSTRAINTS = {
     "budget": r"(?:my (?:new )?(?:(?:max(?:imum)? )?budget|max(?:imum)?)(?: is| of|:)?|"
     r"i (?:can spend|want to spend|won[’']t spend more than))\s+" + PRICE,
@@ -102,8 +112,9 @@ or "a". A new brief must include an authorized item and any explicit recipient.
 Update only the same item and recipient. Use replace for a clearly different request
 that needs its own brief. Use close only when explicitly requested.
 
-If a material question is needed, set question and leave it out of reply so the app
-can render it. A gift size question can use brief="unchanged" and edits=[] if there
+When required_question is present, use that open question and leave any recommendation
+until the recipient’s size is supplied. If a material question is needed, set question
+and leave it out of reply so the app can render it. A gift size question can use brief="unchanged" and edits=[] if there
 is no eligible gift brief. Do not build a brief just to attach a question.
 An open question has null value. A confirmation question uses an exact brief constraint."""
 
@@ -245,7 +256,7 @@ def typed_answer(text, question, brief):
     return None
 
 
-def current_constraints(text):
+def current_constraints(text, brief=None):
     """Read complete values from explicit shopping requests and first-party clauses."""
     unquoted = re.sub(r"""“[^”]*”|"[^"]*"|‘[^’]*’|(?<!\w)'[^']*'(?!\w)""", "", text)
     clauses = re.split(
@@ -255,8 +266,14 @@ def current_constraints(text):
         flags=re.I,
     )
     values = {}
+    recipient_sizes = {}
     for clause in clauses:
         clause = clause.strip().strip(",").strip()
+        if named_size := RECIPIENT_SIZE.fullmatch(clause):
+            recipient, size = named_size.groups()
+            values.setdefault("recipient", {})[recipient.casefold()] = recipient
+            recipient_sizes.setdefault(recipient_scope(recipient), {})[size.casefold()] = size
+            continue
         matched = False
         for field, pattern in CONSTRAINTS.items():
             if match := re.fullmatch(pattern, clause, re.I):
@@ -276,7 +293,19 @@ def current_constraints(text):
             item = re.sub(r"^(?:these |some |a pair of |a gift of |a |an )", "", item, flags=re.I)
             if re.fullmatch(r"[\w-]+(?: [\w-]+){0,5}", item) and item.casefold() not in ("these", "them", "it", "this"):
                 values.setdefault("item", {})[item.casefold()] = item
-    return {field: next(iter(choices.values())) for field, choices in values.items() if len(choices) == 1}
+    constraints = {field: next(iter(choices.values())) for field, choices in values.items() if len(choices) == 1}
+    recipient = constraints.get("recipient")
+    if recipient and (scope := recipient_scope(recipient)) != "me":
+        # First-person sizes belong to the shopper. A gift needs its own size evidence.
+        constraints.pop("size", None)
+        sizes = recipient_sizes.get(scope, {})
+        if len(sizes) == 1:
+            constraints["size"] = next(iter(sizes.values()))
+    elif not recipient and "size" in constraints and brief_matches_request(brief, text, constraints):
+        stored_recipient = brief["fields"].get("recipient", {}).get("value", "me")
+        if recipient_scope(stored_recipient) != "me":
+            constraints.pop("size")
+    return constraints
 
 
 def recipient_scope(value):
@@ -296,6 +325,24 @@ def brief_matches_request(brief, text, constraints):
     recipient = constraints.get("recipient")
     stored = brief["fields"].get("recipient", {}).get("value", "me")
     return recipient is None or recipient_scope(recipient) == recipient_scope(stored)
+
+
+def needs_gift_size(text, constraints, projected_brief, answer, preferences):
+    fields = projected_brief["fields"] if projected_brief else {}
+    recipient = constraints.get("recipient") or fields.get("recipient", {}).get("value")
+    if not recipient or recipient_scope(recipient) == "me" or not FIT_CHOICE.search(text):
+        return False
+    if "size" in constraints or "size" in (answer or {}) or "size" in fields:
+        return False
+    if any(pref["key"] == "size" and pref["recipient"] == recipient_scope(recipient) for pref in preferences):
+        return False
+    options = projected_brief["options"] if projected_brief else ()
+    sizes = {
+        size.casefold()
+        for claim in (text, *(option["value"] for option in options))
+        for size in SIZE_MENTION.findall(claim)
+    }
+    return len(sizes) > 1
 
 
 def brief_in_use(cur, turn, brief):
@@ -348,7 +395,7 @@ def context(cur, turn, state):
     ).fetchall()
     text = turn["text"]
     brief = brief_in_use(cur, turn, state["brief"])
-    constraints = current_constraints(text)
+    constraints = current_constraints(text, brief)
     projected_brief = brief if brief_matches_request(brief, text, constraints) else None
     eligible = [
         p
@@ -372,7 +419,7 @@ def context(cur, turn, state):
         and not answer
         or (answer and state["watermark"] is not None and turn["source_at"] <= state["watermark"])
     ):
-        return None, brief, None
+        return None, brief, None, False
     preferences = []
     normalized = text.casefold()
     current = brief["fields"] if brief else {}
@@ -392,10 +439,12 @@ def context(cur, turn, state):
         {"user": p["text"], "reply": p["reply"] if p["outcome"] == "model" and visible(p, turn) else None}
         for p in reversed(eligible)
     ]
+    require_gift_size = needs_gift_size(text, constraints, projected_brief, answer, preferences)
     payload = {
         "current": text,
         "current_constraints": constraints,
         "typed_answer": answer,
+        "required_question": {"field": "size", "value": None} if require_gift_size else None,
         "brief": projected_brief,
         "preferences": preferences,
         "recent": recent,
@@ -406,13 +455,13 @@ def context(cur, turn, state):
             utf8_size(encoded) + utf8_size(INSTRUCTIONS) + utf8_size(json.dumps(Result.model_json_schema()))
             <= PROMPT_BYTES
         ):
-            return encoded, brief, answer
+            return encoded, brief, answer, require_gift_size
         if recent:
             recent.pop(0)
         elif preferences:
             preferences.pop()
         else:
-            return None, brief, None
+            return None, brief, None, False
 
 
 def scope_mentioned(scope, text):
@@ -431,10 +480,10 @@ class BriefEvidenceError(BriefValidationError):
         self.field = field
 
 
-def validate(raw, turn, brief, answer):
+def validate(raw, turn, brief, answer, *, require_gift_size=False):
     result = Result.model_validate_json(raw)
     text = turn["text"]
-    constraints = current_constraints(text)
+    constraints = current_constraints(text, brief)
     existing_brief_eligible = brief_matches_request(brief, text, constraints)
     reply = result.reply.strip()
     if (
@@ -521,25 +570,25 @@ def validate(raw, turn, brief, answer):
         if "item" not in brief["fields"] or len(brief["options"]) > 8:
             raise BriefValidationError("Incomplete or oversized brief")
     target = None
-    if result.question:
-        if "?" in reply:
+    question = Question(field="size", value=None) if require_gift_size else result.question
+    if question:
+        if not require_gift_size and "?" in reply:
             raise BriefValidationError("Ambiguous question")
-        field, value = result.question.field, result.question.value
+        field, value = question.field, question.value
+        if require_gift_size:
+            reply = "What size does the recipient wear?"
         if result.brief == "unchanged" and not existing_brief_eligible:
             # The app can ask for a detail without making a short answer
             # eligible to edit a brief from a different request.
-            return (
-                f"What {field} should I use for this request? Please include the item and who it’s for.",
-                brief,
-                None,
-            )
+            clarification = reply if require_gift_size else f"What {field} should I use for this request?"
+            return clarification + " Please include the item and who it’s for.", brief, None
         if not brief:
             raise BriefValidationError("A question target requires a brief")
         if value is not None and value != brief["fields"].get(field, {}).get("value"):
             raise BriefValidationError("Unsupported question target")
         target = {"brief_id": brief["id"], "field": field, "value": value}
-        label = "recipient" if field == "recipient" else field
-        reply += f"\n\nIs {value} the right {label}?" if value is not None else f"\n\nWhat {label} should I use?"
+        if not require_gift_size:
+            reply += f"\n\nIs {value} the right {field}?" if value is not None else f"\n\nWhat {field} should I use?"
     if len(reply) > 5000:
         raise ValueError("Unsafe reply")
     utf8_size(reply)
