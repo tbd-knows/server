@@ -2856,6 +2856,48 @@ def test_agent_db_gift_size_required_until_recipient_size_is_known(agent_pilot, 
         assert after == personal
 
 
+@pytest.mark.parametrize("text,reply,recipient_size", [
+    (
+        "Switch to a gift of shoes for my sister. She wears a size 10. "
+        "Maple is size 8. Oak is size 10. Which fits?",
+        "Oak matches your sister’s size 10.",
+        "10",
+    ),
+    (
+        "Switch to a gift of shoes for my sister. Maple is size 8 with a relaxed fit and costs $80. "
+        "Oak is size 10 and costs $65. Which is cheaper?",
+        "Oak is cheaper at $65.",
+        None,
+    ),
+])
+def test_agent_db_gift_comparison_answers_requested_criterion(agent_pilot, text, reply, recipient_size):
+    import json
+
+    from tbd_server.agent.adapter import Generation
+    from tbd_server.agent.store import current_state
+    from test_agent_harness import generated
+
+    store, _, users, _, runner, event, intake, result = agent_pilot
+    prompts = []
+
+    async def model(_, prompt, *__):
+        prompts.append(json.loads(prompt))
+        return Generation(generated(reply=reply))
+
+    runner.adapter = model
+    inbound = intake(event(text))
+    assert runner.step()
+    assert len(prompts) == 1
+    assert prompts[0]["required_question"] is None
+    assert prompts[0]["recipient_size_for_reply"] == recipient_size
+    assert "size" not in prompts[0]["current_constraints"]
+    turn, replies = result(inbound)
+    assert turn["outcome"] == "model" and turn["question"] is None
+    assert len(replies) == 1 and replies[0]["text"] == reply
+    with store.transaction() as cur:
+        assert current_state(cur, users[0]["id"])["brief"] is None
+
+
 @pytest.mark.parametrize("response,expected", [
     ({"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}, "provider_incomplete_max_output_tokens"),
     ({"status": "completed", "output": None}, "provider_unreadable"),

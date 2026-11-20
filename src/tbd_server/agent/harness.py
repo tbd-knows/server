@@ -59,10 +59,18 @@ RECIPIENT_SIZE = re.compile(
     r"(my [\w-]+)(?: (?:wears|takes|needs) (?:a )?size|[’']s (?:shoe )?size(?: is|:))\s+" + SIZE,
     re.I,
 )
+PRONOUN_SIZE = re.compile(
+    r"(?:(?:she|he|they) (?:wears?|takes?|needs?) (?:a )?size|(?:her|his|their) (?:shoe )?size(?: is|:))\s+" + SIZE,
+    re.I,
+)
 SIZE_MENTION = re.compile(r"\bsize\s+" + SIZE + r"\b", re.I)
 FIT_CHOICE = re.compile(
-    r"\b(?:fits?|which (?:one |pair )?(?:should|would) (?:i|you) (?:choose|pick|get|buy)|"
-    r"help me (?:choose|pick))\b",
+    r"(?:(?:which(?: (?:one|pair|option|of these|of the two))?|what) "
+    r"(?:(?:(?:would|will|could|might) )?fits?(?: (?:her|him|them|my [\w-]+))?(?: (?:better|best|well))?"
+    r"|(?:is|would be) (?:a|the) (?:better|best|right) fit(?: for (?:her|him|them|my [\w-]+))?)"
+    r"|(?:will|would|does|do|could|can) (?:either|both|it|they|this|that|these|those)"
+    r"(?: (?:one|option|pair|of them|of these|of those))? fit(?: (?:her|him|them|my [\w-]+))?"
+    r"|(?:compare (?:how they fit|their fit)|help me (?:choose|pick) (?:by|based on) fit))(?: please)?",
     re.I,
 )
 CONSTRAINTS = {
@@ -113,7 +121,10 @@ Update only the same item and recipient. Use replace for a clearly different req
 that needs its own brief. Use close only when explicitly requested.
 
 When required_question is present, use that open question and leave any recommendation
-until the recipient’s size is supplied. If a material question is needed, set question
+until the recipient’s size is supplied. Use recipient_size_for_reply when present to
+compare fit. It is reply context and grants no authority to edit a brief. For a
+price-only comparison, answer the price question without asking for size.
+If a material question is needed, set question
 and leave it out of reply so the app can render it. A gift size question can use brief="unchanged" and edits=[] if there
 is no eligible gift brief. Do not build a brief just to attach a question.
 An open question has null value. A confirmation question uses an exact brief constraint."""
@@ -256,8 +267,7 @@ def typed_answer(text, question, brief):
     return None
 
 
-def current_constraints(text, brief=None):
-    """Read complete values from explicit shopping requests and first-party clauses."""
+def message_clauses(text):
     unquoted = re.sub(r"""“[^”]*”|"[^"]*"|‘[^’]*’|(?<!\w)'[^']*'(?!\w)""", "", text)
     clauses = re.split(
         r"[;\n]|[.!?](?:\s+|$)|,?\s+(?:and|but)\s+(?=(?:i|my|(?:the )?(?:seller|listing|option))\b)"
@@ -265,10 +275,14 @@ def current_constraints(text, brief=None):
         unquoted,
         flags=re.I,
     )
+    return [clause.strip().strip(",").strip() for clause in clauses]
+
+
+def current_constraints(text, brief=None):
+    """Read complete values from explicit shopping requests and first-party clauses."""
     values = {}
     recipient_sizes = {}
-    for clause in clauses:
-        clause = clause.strip().strip(",").strip()
+    for clause in message_clauses(text):
         if named_size := RECIPIENT_SIZE.fullmatch(clause):
             recipient, size = named_size.groups()
             values.setdefault("recipient", {})[recipient.casefold()] = recipient
@@ -327,12 +341,32 @@ def brief_matches_request(brief, text, constraints):
     return recipient is None or recipient_scope(recipient) == recipient_scope(stored)
 
 
-def needs_gift_size(text, constraints, projected_brief, answer, preferences):
+def gift_size_for_reply(text, constraints):
+    recipient = constraints.get("recipient")
+    if not recipient or recipient_scope(recipient) == "me" or "size" in constraints:
+        return None
+    clauses = message_clauses(text)
+    sizes = {match[1].casefold(): match[1] for clause in clauses if (match := PRONOUN_SIZE.fullmatch(clause))}
+    if len(sizes) != 1:
+        return None
+    # A pronoun can inform the reply when it immediately follows the shopping
+    # request naming its recipient. This is separate from editable constraints.
+    if any(
+        SHOPPING_REQUEST.match(prior)
+        and prior.casefold().endswith(" for " + recipient.casefold())
+        and PRONOUN_SIZE.fullmatch(clause)
+        for prior, clause in zip(clauses, clauses[1:])
+    ):
+        return next(iter(sizes.values()))
+    return None
+
+
+def needs_gift_size(text, constraints, projected_brief, answer, preferences, *, reply_size=None):
     fields = projected_brief["fields"] if projected_brief else {}
     recipient = constraints.get("recipient") or fields.get("recipient", {}).get("value")
-    if not recipient or recipient_scope(recipient) == "me" or not FIT_CHOICE.search(text):
+    if not recipient or recipient_scope(recipient) == "me":
         return False
-    if "size" in constraints or "size" in (answer or {}) or "size" in fields:
+    if reply_size is not None or "size" in constraints or "size" in (answer or {}) or "size" in fields:
         return False
     if any(pref["key"] == "size" and pref["recipient"] == recipient_scope(recipient) for pref in preferences):
         return False
@@ -342,7 +376,7 @@ def needs_gift_size(text, constraints, projected_brief, answer, preferences):
         for claim in (text, *(option["value"] for option in options))
         for size in SIZE_MENTION.findall(claim)
     }
-    return len(sizes) > 1
+    return len(sizes) > 1 and any(FIT_CHOICE.fullmatch(clause) for clause in message_clauses(text))
 
 
 def brief_in_use(cur, turn, brief):
@@ -439,11 +473,13 @@ def context(cur, turn, state):
         {"user": p["text"], "reply": p["reply"] if p["outcome"] == "model" and visible(p, turn) else None}
         for p in reversed(eligible)
     ]
-    require_gift_size = needs_gift_size(text, constraints, projected_brief, answer, preferences)
+    reply_size = gift_size_for_reply(text, constraints)
+    require_gift_size = needs_gift_size(text, constraints, projected_brief, answer, preferences, reply_size=reply_size)
     payload = {
         "current": text,
         "current_constraints": constraints,
         "typed_answer": answer,
+        "recipient_size_for_reply": reply_size,
         "required_question": {"field": "size", "value": None} if require_gift_size else None,
         "brief": projected_brief,
         "preferences": preferences,

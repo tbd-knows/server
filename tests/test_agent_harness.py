@@ -396,12 +396,36 @@ def test_gift_size_guard_is_limited_to_unresolved_fit_choices():
     assert not harness.needs_gift_size(text, harness.current_constraints(text), None, None, [sister_size])
     other_choice = text.replace("Which fits?", "Which one is cheaper?")
     assert not harness.needs_gift_size(other_choice, harness.current_constraints(other_choice), None, None, [])
+    budget_choice = text.replace("Which fits?", "Which fits in my budget?")
+    assert not harness.needs_gift_size(budget_choice, harness.current_constraints(budget_choice), None, None, [])
     self_shopping = text.replace("my sister", "me")
     assert not harness.needs_gift_size(self_shopping, harness.current_constraints(self_shopping), None, None, [])
     same_size = text.replace("size 10", "size 8")
     assert not harness.needs_gift_size(same_size, harness.current_constraints(same_size), None, None, [])
     gift_brief = {"fields": {"recipient": {"value": "my sister"}}, "options": []}
     assert "size" not in harness.current_constraints("My size is 8. Which fits?", gift_brief)
+
+
+def test_gift_pronoun_size_does_not_authorize_a_brief_edit():
+    request = "Switch to a gift of shoes for my sister. She wears a size 10."
+    inbound = turn(request)
+    constraints = harness.current_constraints(request)
+    assert harness.gift_size_for_reply(request, constraints) == "10"
+    assert "size" not in constraints
+    proposed = generated(
+        brief="replace",
+        edits=[
+            {"field": "item", "value": "shoes"},
+            {"field": "recipient", "value": "my sister"},
+            {"field": "size", "value": "10"},
+        ],
+    )
+    with pytest.raises(harness.BriefEvidenceError) as error:
+        harness.validate(proposed, inbound, None, None)
+    assert error.value.field == "size"
+
+    ambiguous = request.replace("for my sister.", "for my sister and my mom.")
+    assert harness.gift_size_for_reply(ambiguous, harness.current_constraints(ambiguous)) is None
 
 
 @pytest.mark.parametrize(

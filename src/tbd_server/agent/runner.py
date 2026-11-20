@@ -20,7 +20,7 @@ from .store import HEAD, approved, current_state, finish, lock_user, now, route
 def execution_config(model):
     return {
         "model": model,
-        "prompt": 4,
+        "prompt": 5,
         "schema": 1,
         "deadline": 24,
         "lease": 10,
