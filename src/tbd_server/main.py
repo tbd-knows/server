@@ -20,6 +20,8 @@ messaging = Messaging(
     os.environ["MESSAGING_ACTIVATED_AT"],
     pilot_conversations=json.loads(os.environ.get("COMMS_PILOT_CONVERSATIONS", "{}")),
     cards_enabled=cards_enabled == "true",
+    agent_model=os.environ.get("TBD_AGENT_MODEL"),
+    agent_api_key=os.environ.get("TBD_AGENT_OPENAI_API_KEY"),
 )
 print(json.dumps({"database_connection_verified": store.verify_connection()}), flush=True)
 

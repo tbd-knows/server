@@ -34,7 +34,10 @@ def emit(event, **fields):
 
 def claim(cur, account):
     cur.execute(
-        """UPDATE messaging.messages SET state='uncertain',error_code='idempotency_expired',updated_at=now()
+        """UPDATE messaging.messages SET state='uncertain',
+        error_code=CASE WHEN error_code IN ('quota','account_configuration','rate_limited')
+          AND next_action_at>now() THEN error_code ELSE 'idempotency_expired' END,
+        updated_at=now()
         WHERE direction='outbound' AND account_ref=%s AND state='pending'
         AND provider_message_id IS NULL AND first_attempt_at<=now()-interval '24 hours'""",
         (account,),
@@ -62,7 +65,7 @@ def claim(cur, account):
     ).fetchone()
 
 
-def record_send_result(cur, message_id, attempt_id, result: SendResult):
+def record_send_result(cur, message_id, attempt_id, result: SendResult, *, agent_guard=False):
     row = cur.execute("SELECT * FROM messaging.messages WHERE id=%s FOR UPDATE", (message_id,)).fetchone()
     if row is None or row["direction"] != "outbound" or row["attempt_id"] != attempt_id:
         return False
@@ -74,6 +77,11 @@ def record_send_result(cur, message_id, attempt_id, result: SendResult):
         return False
     if row["provider_message_id"] and result.state == "pending":
         return False
+    state = result.state
+    if agent_guard:
+        from tbd_server.agent.delivery import record_evidence
+
+        state = record_evidence(cur, row, result)
     cur.execute(
         """UPDATE messaging.messages SET state=%s,provider_message_id=coalesce(%s,provider_message_id),
         error_code=%s,observed_status=%s,updated_at=now(),
@@ -81,12 +89,12 @@ def record_send_result(cur, message_id, attempt_id, result: SendResult):
         sent_observed_at=CASE WHEN %s='sent' THEN now() ELSE sent_observed_at END,
         next_action_at=now() + make_interval(secs => %s) WHERE id=%s""",
         (
-            result.state,
+            state,
             result.provider_id,
             result.error_code,
             result.observed_status,
             result.provider_id,
-            result.state,
+            state,
             result.retry_after or (15 if result.state != "pending" else min(30, 2 ** min(row["attempt_count"], 5))),
             message_id,
         ),
@@ -95,7 +103,7 @@ def record_send_result(cur, message_id, attempt_id, result: SendResult):
 
 
 class DeliveryLoop:
-    def __init__(self, database_url, adapter, account, history_turn, *, card_pairs=None):
+    def __init__(self, database_url, adapter, account, history_turn, *, card_pairs=None, agent_pairs=None):
         self.database_url, self.adapter, self.account = database_url, adapter, account
         self.history_turn = history_turn
         self.stop_event = Event()
@@ -108,6 +116,7 @@ class DeliveryLoop:
         self.category = 0
         self.pending_result = None
         self.read_pause_until = 0.0
+        self.agent_pairs = agent_pairs
         self.card_pairs = None if card_pairs is None else dict(card_pairs)
         self.card_executor = None
         self.card_operation = None
@@ -197,6 +206,11 @@ class DeliveryLoop:
         # Result storage is independent of reply state and survives reconnects.
         if self.card_operation is not None and self.card_operation[1].done():
             self.finish_card(db)
+        if self.agent_pairs is not None:
+            from tbd_server.agent.delivery import suppress_revoked
+
+            with self.transaction(db) as cur:
+                suppress_revoked(cur, self.account, self.agent_pairs)
         if monotonic() < self.read_pause_until:
             return
         with self.transaction(db) as cur:
@@ -263,6 +277,17 @@ class DeliveryLoop:
                 attempt_id=job["attempt_id"],
                 queue_age_seconds=(datetime.now(timezone.utc) - job["created_at"]).total_seconds(),
             )
+            if self.agent_pairs is not None:
+                from tbd_server.agent.delivery import authorize_post
+
+                with self.transaction(db) as cur:
+                    deadline = authorize_post(cur, job, self.account, self.agent_pairs)
+                if deadline is None:
+                    return
+                if monotonic() >= deadline:
+                    self.pending_result = (job, SendResult("pending", error_code="agent_claim_expired"))
+                    self.save_result(db)
+                    return
             api_started = monotonic()
             result = self.adapter.send(job)
             self.last_send = monotonic()
@@ -350,10 +375,13 @@ class DeliveryLoop:
     def save_result(self, db):
         # Keep known outcomes across database reconnections; never re-POST them.
         job, result = self.pending_result
-        while not self.stop_event.is_set():
+        # Attempt the transaction even when shutdown started during the POST.
+        while True:
             try:
                 with self.transaction(db) as cur:
-                    applied = record_send_result(cur, job["id"], job["attempt_id"], result)
+                    applied = record_send_result(
+                        cur, job["id"], job["attempt_id"], result, agent_guard=self.agent_pairs is not None,
+                    )
                 emit(
                     "send_result",
                     message_id=job["id"],
@@ -371,4 +399,5 @@ class DeliveryLoop:
                 if db.closed or db.broken:
                     raise
                 self.last_tick = monotonic()
-                self.stop_event.wait(1)
+                if self.stop_event.wait(1):
+                    return
