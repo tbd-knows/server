@@ -83,7 +83,7 @@ CONSTRAINTS = {
     "brand": r"(?:my brand(?: is|:)|i (?:need|want|prefer) (?:the )?brand) (.+)",
     "material": r"(?:my material(?: is|:)|i (?:need|want|prefer)) (cotton|linen|wool|leather|silk|polyester|nylon|denim|suede)",
 }
-CONTEXT_VERSION = 7
+CONTEXT_VERSION = 8
 SCHEMA_VERSION = 1
 
 
@@ -240,7 +240,8 @@ def withdrawn_task_correction(text):
 
 
 REPEAT_REQUEST = r"(?:again|one more time|once more|side by side)"
-REPEAT_SUFFIX = re.compile(r"(?:^|\s+)" + REPEAT_REQUEST + r"(?: please)?$", re.I)
+POLITE_EDGES = re.compile(r"^please\b[ ,]*|[ ,]+please$", re.I)
+REPEAT_SUFFIX = re.compile(r"(?:^|\s+)" + REPEAT_REQUEST + r"$", re.I)
 OPTION_REFERENCE_ONLY = re.compile(
     OPTION_REFERENCE + r"|(?:both|(?:the|these|those) two) of (?:them|these|those)|"
     r"the same(?: (?:options?|choices?|ones?|listings?))?|the pair|"
@@ -261,12 +262,12 @@ NON_ITEM_START = re.compile(r"^(?:not|by|on|based on|using|for|between|according
 
 
 def shopping_item(details):
-    if ACTIVE_OPTIONS_PREFIX.match(details.lstrip()):
-        return ""
     details = COMPARISON_QUALIFIER.split(details, maxsplit=1)[0].strip()
-    details = REPEAT_SUFFIX.sub("", details)
+    details = REPEAT_SUFFIX.sub("", POLITE_EDGES.sub("", details))
+    if ACTIVE_OPTIONS_PREFIX.match(details) or OPTION_REFERENCE_ONLY.fullmatch(details):
+        return ""
     item = re.split(r"\s+(?:for|with|under|up to|at most|by|on (?:price|fit|condition|size)|in size)\b|,", details, maxsplit=1, flags=re.I)[0].strip()
-    item = REPEAT_SUFFIX.sub("", item)
+    item = REPEAT_SUFFIX.sub("", POLITE_EDGES.sub("", item))
     reference = re.split(r"\s+(?:on|based on|according to)\b", item, maxsplit=1, flags=re.I)[0]
     if OPTION_REFERENCE_ONLY.fullmatch(reference) or NON_ITEM_START.match(item):
         return ""
@@ -308,7 +309,7 @@ def request_constraints(text, brief=None):
             continue
         request = SHOPPING_REQUEST.match(clause)
         if request:
-            details = clause[request.end() :].split(":", 1)[0]
+            details = POLITE_EDGES.sub("", clause[request.end() :].split(":", 1)[0].strip())
             for recipient in RECIPIENT.finditer(details):
                 values.setdefault("recipient", {})[recipient_scope(recipient[1])] = recipient[1]
             if cap := re.search(r"\b(?:under|up to|at most)\s+" + PRICE, details, re.I):

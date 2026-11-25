@@ -28,6 +28,15 @@ MEMORY_CONFLICT = re.compile(
     re.I,
 )
 
+# Inspect the full companion, even when its opening words form a shopping request.
+COMPANION_CONTROL_REFERENCE = re.compile(
+    r"\b(?:preferences?|what (?:you|tbd) (?:saved|remember)|"
+    r"(?:my|our|your|the|saved|stored|standing|chat) (?:memory|(?:shopping )?brief))\b"
+    r"|\b(?:without|instead of|rather than|before)\s+(?:(?:you|we|i)\s+)?"
+    r"(?:forget(?:ting)?|delet(?:e|ing)|clear(?:ing)?|eras(?:e|ing)|reset(?:ting)?|paus(?:e|ing)|clos(?:e|ing))\b",
+    re.I,
+)
+
 SHOPPING_BUDGET = re.compile(
     r"(?:(?:please )?keep (?:(?:the|my) )?budget (?:at|under|below|within)|(?:my|the) budget is)"
     r"\s+\$\s?\d[\d,]*(?:\.\d{2})?",
@@ -119,8 +128,10 @@ def memory_control(text, state, turn):
     companions = [REQUEST_INTRODUCTION.sub("", clause.rstrip(".!?")) for clause in other_clauses]
     shopping = any(SHOPPING_REQUEST.match(clause) for clause in companions)
     # A shopping request elsewhere in the turn cannot authorize an ambiguous companion clause.
-    if MEMORY_CONFLICT.search("; ".join(other_clauses)) or any(
-        not (
+    if any(
+        MEMORY_CONFLICT.search(clause)
+        or COMPANION_CONTROL_REFERENCE.search(clause)
+        or not (
             SHOPPING_REQUEST.match(clause) or ACTION.match(clause)
             or (shopping and SHOPPING_BUDGET.fullmatch(clause))
         )

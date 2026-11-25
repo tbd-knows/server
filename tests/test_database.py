@@ -4151,6 +4151,8 @@ def open_reviewed_shoes(agent, *, question=None):
     "Forget all preferences. Compare backpacks. Actually, keep them.",
     "Forget all preferences. Compare backpacks. Actually, keep all of them.",
     "Forget all preferences. Compare backpacks. Actually, I want to keep them.",
+    "Forget all preferences. Compare backpacks without clearing my preferences.",
+    "Forget all preferences. Compare backpacks without clearing them.",
     "Forget all preferences. Compare backpacks, but I want to keep them.",
     "Forget all preferences. Compare backpacks. I’m reconsidering.",
     "Forget all preferences. Compare backpacks. Keep everything instead.",
@@ -4179,6 +4181,7 @@ def test_reviewed_r1_quoted_and_withdrawn_controls_preserve_state(reviewed_agent
 @pytest.mark.parametrize("body", [
     "Forget all preferences. Compare backpacks.",
     "Forget all preferences. Compare backpacks. Keep the budget under $90.",
+    "Forget all preferences. Compare backpacks without leather under $90.",
 ])
 def test_reviewed_r1_explicit_mixed_forget_commits_once(reviewed_agent, body):
     from tbd_server.agent import harness
@@ -4212,6 +4215,8 @@ def test_reviewed_r3_reference_keeps_brief_and_switch_retires_it(reviewed_agent,
         agent.proposals.extend([
             Generation(generated(reply="Aspen costs $80 and Birch costs $90.")),
             Generation(generated(reply="Aspen costs $80, and Birch costs $90.")),
+            Generation(generated(reply="Aspen is $80. Birch is $90.")),
+            Generation(generated(reply="Birch costs $90. Aspen is $80.")),
             Generation(generated(reply="I’d check the fit measurements for both options.")),
             Generation(generated(reply="Share the backpacks you’d like to compare.")),
         ])
@@ -4220,6 +4225,8 @@ def test_reviewed_r3_reference_keeps_brief_and_switch_retires_it(reviewed_agent,
     for body, expected_reply in (
         ("Compare the two one more time.", "Aspen costs $80 and Birch costs $90."),
         ("Compare them one last time", "Aspen costs $80, and Birch costs $90."),
+        ("Compare the two please.", "Aspen is $80. Birch is $90."),
+        ("Compare the two, please.", "Birch costs $90. Aspen is $80."),
         ("Compare both options but focus on fit", "I’d check the fit measurements for both options."),
         ("Let’s switch to backpacks.", "Share the backpacks you’d like to compare."),
     ):
