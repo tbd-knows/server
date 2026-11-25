@@ -2,10 +2,18 @@
 
 import asyncio
 from dataclasses import dataclass
+from typing import Protocol
 
 import httpx
 
-from .harness import INSTRUCTIONS, Result
+
+@dataclass(frozen=True)
+class InferenceRequest:
+    model: str
+    instructions: str
+    context: str
+    schema: dict
+    max_output: int
 
 
 @dataclass(frozen=True)
@@ -16,11 +24,15 @@ class Generation:
     reason: str | None = None
 
 
+class Adapter(Protocol):
+    async def __call__(self, request: InferenceRequest, timeout: float) -> Generation: ...
+
+
 class OpenAI:
     def __init__(self, api_key):
         self.api_key = api_key
 
-    async def __call__(self, model, prompt, max_output, timeout):
+    async def __call__(self, request: InferenceRequest, timeout: float) -> Generation:
         try:
             async with asyncio.timeout(timeout):
                 async with httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(retries=0), trust_env=False) as client:
@@ -28,17 +40,17 @@ class OpenAI:
                         "https://api.openai.com/v1/responses",
                         headers={"Authorization": "Bearer " + self.api_key},
                         json={
-                            "model": model,
-                            "instructions": INSTRUCTIONS,
-                            "input": prompt,
+                            "model": request.model,
+                            "instructions": request.instructions,
+                            "input": request.context,
                             "store": False,
-                            "max_output_tokens": max_output,
+                            "max_output_tokens": request.max_output,
                             "text": {
                                 "format": {
                                     "type": "json_schema",
-                                    "name": "commerce_reply",
+                                    "name": "tbd_reply",
                                     "strict": True,
-                                    "schema": Result.model_json_schema(),
+                                    "schema": request.schema,
                                 }
                             },
                         },
