@@ -40,16 +40,19 @@ SHOPPING_BUDGET = re.compile(
     re.I,
 )
 COMPANION_QUALIFIER = re.compile(
-    r"\b(?:without|unless|if|except|until|before|after|while|provided|as long as|"
-    r"rather than|instead of|so that)\b",
+    r"\b(?:and|or|but|yet|though|although|however|otherwise|without|unless|if|except|until|"
+    r"before|after|while|provided|as long as|rather than|instead of|so that|"
+    r"under|below|within|up to|at most)\b",
     re.I,
 )
 SHOPPING_MATERIAL = r"(?:cotton|linen|wool|leather|silk|polyester|nylon|denim|suede)"
-SHOPPING_EXCLUSION = re.compile(
-    rf"without\s+{SHOPPING_MATERIAL}(?:\s+(?:or|and)\s+{SHOPPING_MATERIAL})*"
-    rf"(?:[,\s]+(?:under|below|within|up to|at most)\s+{SHOPPING_AMOUNT})?",
+SHOPPING_LIMIT = rf"(?:under|below|within|up to|at most)\s+{SHOPPING_AMOUNT}"
+SHOPPING_QUALIFIERS = re.compile(
+    rf"(?:{SHOPPING_LIMIT}|without\s+{SHOPPING_MATERIAL}(?:\s+(?:or|and)\s+{SHOPPING_MATERIAL})*"
+    rf"(?:[,\s]+{SHOPPING_LIMIT})?)",
     re.I,
 )
+COMPANION_OBJECT = re.compile(r"[\w’'-]+(?:\s+[\w’'-]+)*")
 REQUEST_INTRODUCTION = re.compile(r"^(?:i|we) (?:want|need) to\s+", re.I)
 
 CONTROL_CLARIFICATION = "Please confirm what you want me to do with your preference memory."
@@ -125,13 +128,25 @@ def is_memory_input(text):
 def compatible_companion(clause, shopping):
     if MEMORY_CONFLICT.search(clause) or COMPANION_CONTROL_REFERENCE.search(clause):
         return False
-    if qualifier := COMPANION_QUALIFIER.search(clause):
-        # A mixed control needs positive evidence that the entire qualifier concerns shopping.
-        return bool(SHOPPING_REQUEST.match(clause) and SHOPPING_EXCLUSION.fullmatch(clause[qualifier.start():]))
-    return bool(
-        SHOPPING_REQUEST.match(clause) or ACTION.match(clause)
-        or (shopping and SHOPPING_BUDGET.fullmatch(clause))
-    )
+    if shopping and SHOPPING_BUDGET.fullmatch(clause):
+        return True
+    if request := SHOPPING_REQUEST.match(clause):
+        detail = clause[request.end():].strip()
+        qualifier = COMPANION_QUALIFIER.search(detail)
+        if qualifier is None:
+            return COMPANION_OBJECT.fullmatch(detail) is not None
+        # A valid shopping item does not authorize an unresolved qualifier.
+        item = detail[:qualifier.start()].rstrip(" ,")
+        return bool(
+            COMPANION_OBJECT.fullmatch(item)
+            and SHOPPING_QUALIFIERS.fullmatch(detail[qualifier.start():])
+        )
+    if action := ACTION.match(clause):
+        if COMPANION_QUALIFIER.search(clause):
+            return False
+        detail = clause[action.end():].strip()
+        return not detail or COMPANION_OBJECT.fullmatch(detail) is not None
+    return False
 
 
 def memory_control(text, state, turn):

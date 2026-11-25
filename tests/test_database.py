@@ -4152,6 +4152,8 @@ def open_reviewed_shoes(agent, *, question=None):
     "Forget all preferences. Compare backpacks. Actually, keep all of them.",
     "Forget all preferences. Compare backpacks. Actually, I want to keep them.",
     "Forget all preferences. Compare backpacks without clearing my preferences.",
+    "Forget all preferences. Compare backpacks but hold off on the first part.",
+    "Forget all preferences. Compare backpacks and hold off on the first part.",
     "Forget all preferences. Compare backpacks without changing what you’ve saved.",
     "Forget all preferences. Compare backpacks without making any changes.",
     "Forget all preferences. Compare backpacks without leather unless it changes anything.",
@@ -4174,7 +4176,10 @@ def test_reviewed_r1_quoted_and_withdrawn_controls_preserve_state(reviewed_agent
     before = agent.state()
     calls = len(agent.calls)
     _, turn, reply = agent.settle(body, "control")
-    assert reply in (memory.CONTROL_CLARIFICATION, harness.KEEP_BRIEF)
+    if body.startswith("Forget all preferences."):
+        assert reply == memory.CONTROL_CLARIFICATION
+    else:
+        assert reply in (memory.CONTROL_CLARIFICATION, harness.KEEP_BRIEF)
     assert len(agent.calls) == calls and turn["granted_at"] is None
     after = agent.state()
     for field in ("preferences", "paused", "brief", "reset_sequence", "reset_source_at"):
@@ -4184,6 +4189,7 @@ def test_reviewed_r1_quoted_and_withdrawn_controls_preserve_state(reviewed_agent
 @pytest.mark.parametrize("body", [
     "Forget all preferences. Compare backpacks.",
     "Forget all preferences. Compare backpacks. Keep the budget under $90.",
+    "Forget all preferences. Compare backpacks under $90.",
     "Forget all preferences. Compare backpacks without leather under $90.",
 ])
 def test_reviewed_r1_explicit_mixed_forget_commits_once(reviewed_agent, body):
@@ -4204,7 +4210,8 @@ def test_reviewed_r1_explicit_mixed_forget_commits_once(reviewed_agent, body):
 
 
 @pytest.mark.parametrize("mode", ["model", "fallback", "offline"])
-def test_reviewed_r3_reference_keeps_brief_and_switch_retires_it(reviewed_agent, mode):
+@pytest.mark.parametrize("switch", ["Let’s switch to backpacks.", "Let’s switch to the two backpacks"])
+def test_reviewed_r3_reference_keeps_brief_and_switch_retires_it(reviewed_agent, mode, switch):
     from tbd_server.agent import harness
     from tbd_server.agent.adapter import Generation
     from test_agent_harness import generated
@@ -4235,7 +4242,7 @@ def test_reviewed_r3_reference_keeps_brief_and_switch_retires_it(reviewed_agent,
         ("Compare the two thanks", "At $80, Aspen costs less than Birch at $90."),
         ("Compare the two whenever you can.", "Aspen is $80, compared with $90 for Birch."),
         ("Compare both options but focus on fit", "I’d check the fit measurements for both options."),
-        ("Let’s switch to backpacks.", "Share the backpacks you’d like to compare."),
+        (switch, "Share the backpacks you’d like to compare."),
     ):
         _, turn, reply = agent.settle(body, outcome)
         assert reply == (expected_reply if mode == "model" else harness.FALLBACK)

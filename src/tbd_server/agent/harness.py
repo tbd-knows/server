@@ -83,7 +83,7 @@ CONSTRAINTS = {
     "brand": r"(?:my brand(?: is|:)|i (?:need|want|prefer) (?:the )?brand) (.+)",
     "material": r"(?:my material(?: is|:)|i (?:need|want|prefer)) (cotton|linen|wool|leather|silk|polyester|nylon|denim|suede)",
 }
-CONTEXT_VERSION = 9
+CONTEXT_VERSION = 10
 SCHEMA_VERSION = 1
 
 
@@ -250,7 +250,12 @@ OPTION_REFERENCE_ONLY = re.compile(
     re.I,
 )
 ACTIVE_OPTIONS_PREFIX = re.compile(
-    r"^(?:them|it|(?:the|these|those) two|(?:both|the|these|those) (?:options?|choices?|ones?|listings?))\b",
+    r"^(?:them|it|(?:both|the|these|those) (?:two )?(?:options?|choices?|ones?|listings?))\b",
+    re.I,
+)
+COUNTED_TARGET = re.compile(r"^(?:the|these|those)\s+(?:two|2)\s+", re.I)
+COUNTED_REFERENCE_TAIL = re.compile(
+    r"^(?:of|when(?:ever)?|if|as|and|or|but|please|without|real quick|quickly|briefly)\b",
     re.I,
 )
 COMPARISON_QUALIFIER = re.compile(
@@ -271,6 +276,10 @@ def shopping_item(details):
     reference = re.split(r"\s+(?:on|based on|according to)\b", item, maxsplit=1, flags=re.I)[0]
     if OPTION_REFERENCE_ONLY.fullmatch(reference) or NON_ITEM_START.match(item):
         return ""
+    if count := COUNTED_TARGET.match(item):
+        item = item[count.end():]
+        if COUNTED_REFERENCE_TAIL.match(item):
+            return ""
     return re.sub(r"^(?:both |these |those |some |a pair of |a gift of |a |an )", "", item, flags=re.I)
 
 
