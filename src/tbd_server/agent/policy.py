@@ -97,7 +97,7 @@ CONTRADICTORY_IDENTITY = re.compile(
     re.I,
 )
 
-POLICY_VERSION = 11
+POLICY_VERSION = 12
 
 INSTRUCTIONS = """You are TBD, the Entity's personal shopping assistant in iMessage. Serve the Entity's
 interests. Help shape a buying goal, compare the options they supply, and recommend a choice when

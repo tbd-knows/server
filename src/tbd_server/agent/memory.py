@@ -29,9 +29,10 @@ MEMORY_CONFLICT = re.compile(
     re.I,
 )
 
-KEEP_MEMORY_REFERENCE = re.compile(
-    r"(?:(?:actually|instead)[, ]+)?(?:please )?(?:just )?(?:keep|retain) "
-    r"(?:them|those|these)(?: (?:as (?:they are|is)|unchanged|the same))?(?: (?:instead|please))?[.!?]*",
+RETENTION_DIRECTIVE = re.compile(
+    r"(?:(?:actually|instead)[, ]+)?(?:please )?(?:just )?(?:keep|retain|leave)\s+"
+    r"(?:(?:(?:all|both|each|any|some|most) of )?(?:it|that|them|those|these)\b"
+    r"|(?:everything|all|both|the rest)(?=$|[,.!?]|\s+(?:instead|unchanged|alone|as)\b))",
     re.I,
 )
 
@@ -115,7 +116,8 @@ def memory_control(text, state, turn):
         return CONTROL_CLARIFICATION
     index, command = commands[0]
     other_clauses = [clause.strip() for i, clause in enumerate(clauses) if i != index and clause.strip()]
-    if any(KEEP_MEMORY_REFERENCE.fullmatch(clause) for clause in other_clauses):
+    # An unresolved retention reference can withdraw the control, even after a shopping clause.
+    if any(RETENTION_DIRECTIVE.match(clause) for clause in other_clauses):
         return CONTROL_CLARIFICATION
     rest = "; ".join(other_clauses)
     lower = normalize(command)
