@@ -83,7 +83,7 @@ CONSTRAINTS = {
     "brand": r"(?:my brand(?: is|:)|i (?:need|want|prefer) (?:the )?brand) (.+)",
     "material": r"(?:my material(?: is|:)|i (?:need|want|prefer)) (cotton|linen|wool|leather|silk|polyester|nylon|denim|suede)",
 }
-CONTEXT_VERSION = 8
+CONTEXT_VERSION = 9
 SCHEMA_VERSION = 1
 
 
@@ -240,7 +240,7 @@ def withdrawn_task_correction(text):
 
 
 REPEAT_REQUEST = r"(?:again|one more time|once more|side by side)"
-POLITE_EDGES = re.compile(r"^please\b[ ,]*|[ ,]+please$", re.I)
+POLITE_EDGES = re.compile(r"^please\b[ ,]*|[ ,]+(?:please|thanks|thank you)$", re.I)
 REPEAT_SUFFIX = re.compile(r"(?:^|\s+)" + REPEAT_REQUEST + r"$", re.I)
 OPTION_REFERENCE_ONLY = re.compile(
     OPTION_REFERENCE + r"|(?:both|(?:the|these|those) two) of (?:them|these|those)|"
@@ -250,7 +250,7 @@ OPTION_REFERENCE_ONLY = re.compile(
     re.I,
 )
 ACTIVE_OPTIONS_PREFIX = re.compile(
-    r"^(?:them|it|(?:both|the(?: two)?|these(?: two)?|those(?: two)?) (?:options?|choices?|ones?|listings?))\b",
+    r"^(?:them|it|(?:the|these|those) two|(?:both|the|these|those) (?:options?|choices?|ones?|listings?))\b",
     re.I,
 )
 COMPARISON_QUALIFIER = re.compile(

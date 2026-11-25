@@ -28,18 +28,26 @@ MEMORY_CONFLICT = re.compile(
     re.I,
 )
 
-# Inspect the full companion, even when its opening words form a shopping request.
 COMPANION_CONTROL_REFERENCE = re.compile(
-    r"\b(?:preferences?|what (?:you|tbd) (?:saved|remember)|"
-    r"(?:my|our|your|the|saved|stored|standing|chat) (?:memory|(?:shopping )?brief))\b"
-    r"|\b(?:without|instead of|rather than|before)\s+(?:(?:you|we|i)\s+)?"
-    r"(?:forget(?:ting)?|delet(?:e|ing)|clear(?:ing)?|eras(?:e|ing)|reset(?:ting)?|paus(?:e|ing)|clos(?:e|ing))\b",
+    r"\b(?:preferences?|what (?:you|tbd)(?:[’']ve| have)? (?:saved|remember)|"
+    r"(?:my|our|your|the|saved|stored|standing|chat) (?:memory|(?:shopping )?brief))\b",
     re.I,
 )
-
+SHOPPING_AMOUNT = r"\$\s?\d[\d,]*(?:\.\d{2})?"
 SHOPPING_BUDGET = re.compile(
     r"(?:(?:please )?keep (?:(?:the|my) )?budget (?:at|under|below|within)|(?:my|the) budget is)"
-    r"\s+\$\s?\d[\d,]*(?:\.\d{2})?",
+    rf"\s+{SHOPPING_AMOUNT}",
+    re.I,
+)
+COMPANION_QUALIFIER = re.compile(
+    r"\b(?:without|unless|if|except|until|before|after|while|provided|as long as|"
+    r"rather than|instead of|so that)\b",
+    re.I,
+)
+SHOPPING_MATERIAL = r"(?:cotton|linen|wool|leather|silk|polyester|nylon|denim|suede)"
+SHOPPING_EXCLUSION = re.compile(
+    rf"without\s+{SHOPPING_MATERIAL}(?:\s+(?:or|and)\s+{SHOPPING_MATERIAL})*"
+    rf"(?:[,\s]+(?:under|below|within|up to|at most)\s+{SHOPPING_AMOUNT})?",
     re.I,
 )
 REQUEST_INTRODUCTION = re.compile(r"^(?:i|we) (?:want|need) to\s+", re.I)
@@ -114,6 +122,18 @@ def is_memory_input(text):
     return quoted_control(text) or any(memory_command(clause) is not None for clause in memory_clauses(text))
 
 
+def compatible_companion(clause, shopping):
+    if MEMORY_CONFLICT.search(clause) or COMPANION_CONTROL_REFERENCE.search(clause):
+        return False
+    if qualifier := COMPANION_QUALIFIER.search(clause):
+        # A mixed control needs positive evidence that the entire qualifier concerns shopping.
+        return bool(SHOPPING_REQUEST.match(clause) and SHOPPING_EXCLUSION.fullmatch(clause[qualifier.start():]))
+    return bool(
+        SHOPPING_REQUEST.match(clause) or ACTION.match(clause)
+        or (shopping and SHOPPING_BUDGET.fullmatch(clause))
+    )
+
+
 def memory_control(text, state, turn):
     if quoted_control(text):
         return CONTROL_CLARIFICATION
@@ -128,15 +148,7 @@ def memory_control(text, state, turn):
     companions = [REQUEST_INTRODUCTION.sub("", clause.rstrip(".!?")) for clause in other_clauses]
     shopping = any(SHOPPING_REQUEST.match(clause) for clause in companions)
     # A shopping request elsewhere in the turn cannot authorize an ambiguous companion clause.
-    if any(
-        MEMORY_CONFLICT.search(clause)
-        or COMPANION_CONTROL_REFERENCE.search(clause)
-        or not (
-            SHOPPING_REQUEST.match(clause) or ACTION.match(clause)
-            or (shopping and SHOPPING_BUDGET.fullmatch(clause))
-        )
-        for clause in companions
-    ):
+    if any(not compatible_companion(clause, shopping) for clause in companions):
         return CONTROL_CLARIFICATION
     lower = normalize(command)
     operation = {
