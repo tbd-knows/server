@@ -71,7 +71,7 @@ FALSE_CONFIRMATION = re.compile(
     r"\b(?:I|we|TBD)(?: (?:(?:have|has|had|already|just|successfully|will|can) )*|[’'](?:ve|ll) (?:just )?)"
     r"(?:saved|forgot|deleted|ordered|purchased|bought|paid|verified|confirmed|contacted|messaged|emailed|"
     r"(?:(?:spoke|talked|heard back) (?:with|to|from)|called|texted|phoned|asked|reached out to)"
-    r" (?:the |a )?(?:seller|merchant|vendor)|"
+    r" (?:the |a )?(?:[\w-]+(?: [\w-]+){0,3}[’']s )?(?:seller|merchant|vendor)|"
     r"checked (?:live|the order|inventory)|(?:placed|submitted) (?:an|the|your|this) order|"
     r"(?:buy|purchase|order|pay|verify|contact|message|email) (?:it|anything|the seller|the order|for you|on your behalf)|"
     r"(?:found|sourced|searched|pulled up|located) (?:you |some |these |the |three |two |\d+ )?"
@@ -79,7 +79,8 @@ FALSE_CONFIRMATION = re.compile(
     r"|\b(?:order|payment) (?:is |was |has been )?(?:confirmed|completed|placed|verified|processed|submitted)\b"
     r"|\b(?:verified|confirmed) (?:listing|seller|inventory|order|payment|availability)\b"
     r"|\b(?:the seller|they) (?:told|confirmed to) (?:me|us)\b"
-    r"|\b(?:i|we) checked\b.{0,40}\b(?:stock|availability|listing|seller|online|live)\b"
+    r"|\b(?:i|we|TBD)\b[^.!?;]{0,70}\b(?:checked|verified|confirmed)\b[^.!?;]{0,50}"
+    r"\b(?:stock|availability|listing|seller|online|live)\b"
     r"|\b(?:stock|availability) (?:was |is |has been )?(?:verified|confirmed)\b"
     r"|\b(?:currently in stock|available now|your order (?:shipped|is (?:on its way|out for delivery)))\b",
     re.I,
@@ -96,7 +97,7 @@ CONTRADICTORY_IDENTITY = re.compile(
     re.I,
 )
 
-POLICY_VERSION = 10
+POLICY_VERSION = 11
 
 INSTRUCTIONS = """You are TBD, the Entity's personal shopping assistant in iMessage. Serve the Entity's
 interests. Help shape a buying goal, compare the options they supply, and recommend a choice when
@@ -166,7 +167,10 @@ def direct_reply(text):
         # A direct question can follow a comma-separated introduction.
         if DIRECT_IDENTITY.fullmatch(re.sub("^" + REQUEST_PREFIX, "", request.rpartition(",")[2].strip(), flags=re.I)):
             return IDENTITY
-        if DIRECT_CAPABILITIES.fullmatch(re.sub("^" + REQUEST_PREFIX, "", request, flags=re.I)):
+        if (
+            DIRECT_CAPABILITIES.fullmatch(request)
+            or DIRECT_CAPABILITIES.fullmatch(re.sub("^" + REQUEST_PREFIX, "", request, flags=re.I))
+        ):
             return CAPABILITIES
         if re.fullmatch(REQUEST_PREFIX + r"(?:switch|change|use|pick|select)\b.{0,60}\bmodel\b.*", request, re.I):
             return "TBD selects the model used in this chat. Tell me what you’d like help with."

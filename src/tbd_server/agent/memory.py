@@ -29,6 +29,12 @@ MEMORY_CONFLICT = re.compile(
     re.I,
 )
 
+KEEP_MEMORY_REFERENCE = re.compile(
+    r"(?:(?:actually|instead)[, ]+)?(?:please )?(?:just )?(?:keep|retain) "
+    r"(?:them|those|these)(?: (?:as (?:they are|is)|unchanged|the same))?(?: (?:instead|please))?[.!?]*",
+    re.I,
+)
+
 CONTROL_CLARIFICATION = "Please confirm what you want me to do with your preference memory."
 CONTROL_HEAD = re.compile(
     r"^(?:remember|save|correct|repair|forget|pause memory|resume memory|show my preferences|"
@@ -108,7 +114,10 @@ def memory_control(text, state, turn):
     if len(commands) != 1 or not commands[0][1]:
         return CONTROL_CLARIFICATION
     index, command = commands[0]
-    rest = "; ".join(clause.strip() for i, clause in enumerate(clauses) if i != index and clause.strip())
+    other_clauses = [clause.strip() for i, clause in enumerate(clauses) if i != index and clause.strip()]
+    if any(KEEP_MEMORY_REFERENCE.fullmatch(clause) for clause in other_clauses):
+        return CONTROL_CLARIFICATION
+    rest = "; ".join(other_clauses)
     lower = normalize(command)
     operation = {
         "pause memory": "pause",

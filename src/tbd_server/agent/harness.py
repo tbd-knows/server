@@ -83,7 +83,7 @@ CONSTRAINTS = {
     "brand": r"(?:my brand(?: is|:)|i (?:need|want|prefer) (?:the )?brand) (.+)",
     "material": r"(?:my material(?: is|:)|i (?:need|want|prefer)) (cotton|linen|wool|leather|silk|polyester|nylon|denim|suede)",
 }
-CONTEXT_VERSION = 4
+CONTEXT_VERSION = 5
 SCHEMA_VERSION = 1
 
 
@@ -141,6 +141,7 @@ TYPED_VALUES = {
 }
 CONFIRMATION = re.compile(r"yes(?: please)?|correct", re.I)
 ACKNOWLEDGMENT = re.compile(r"no(?: thanks)?|sure", re.I)
+EXPLICIT_SIZE_ANSWER = re.compile(r"size(?:\s+|:\s*)[\w.-]+", re.I)
 
 
 def answer_text(text):
@@ -151,6 +152,7 @@ def short_answer(text):
     answer = answer_text(text).rstrip("?")
     return (
         CONFIRMATION.fullmatch(answer) is not None or ACKNOWLEDGMENT.fullmatch(answer) is not None
+        or EXPLICIT_SIZE_ANSWER.fullmatch(answer) is not None
         or any(re.fullmatch(pattern, answer, re.I) for pattern in TYPED_VALUES.values())
     )
 
@@ -172,14 +174,15 @@ def typed_answer(text, question, brief):
     return None
 
 
+MESSAGE_SEPARATORS = re.compile(
+    r"[;\n]|[.!?](?:\s+|$)|,?\s+(?:and|but)\s+(?=(?:i|my|(?:the )?(?:seller|listing|option)|(?:also )?(?:buy|contact|pay|order|text|message|email|check|verify))\b)"
+    r"|,\s+(?=(?:i|my|(?:the )?(?:seller|listing|option)|(?:also )?(?:buy|contact|pay|order|text|message|email|check|verify))\b)",
+    re.I,
+)
+
+
 def message_clauses(text):
-    clauses = re.split(
-        r"[;\n]|[.!?](?:\s+|$)|,?\s+(?:and|but)\s+(?=(?:i|my|(?:the )?(?:seller|listing|option)|(?:also )?(?:buy|contact|pay|order|text|message|email|check|verify))\b)"
-        r"|,\s+(?=(?:i|my|(?:the )?(?:seller|listing|option)|(?:also )?(?:buy|contact|pay|order|text|message|email|check|verify))\b)",
-        without_quotes(text),
-        flags=re.I,
-    )
-    return [clause.strip().strip(",").strip() for clause in clauses]
+    return [clause.strip().strip(",").strip() for clause in MESSAGE_SEPARATORS.split(without_quotes(text))]
 
 
 SCOPE_CLARIFICATIONS = {
@@ -236,6 +239,28 @@ def withdrawn_task_correction(text):
     return False
 
 
+REPEAT_REQUEST = r"(?:again|one more time|once more|side by side)"
+REPEAT_SUFFIX = re.compile(r"(?:^|\s+)" + REPEAT_REQUEST + r"(?: please)?$", re.I)
+OPTION_REFERENCE_ONLY = re.compile(
+    OPTION_REFERENCE + r"|(?:both|(?:the|these|those) two) of (?:them|these|those)|"
+    r"the same(?: (?:options?|choices?|ones?|listings?))?|the pair|"
+    r"(?:their|the) (?:prices?|sizes?|conditions?|differences)|"
+    r"(?:what|the ones) (?:we discussed|you showed me)",
+    re.I,
+)
+NON_ITEM_START = re.compile(r"^(?:not|by|on|based on|using|for|between|according to|once more)\b", re.I)
+
+
+def shopping_item(details):
+    details = REPEAT_SUFFIX.sub("", details.strip())
+    item = re.split(r"\s+(?:for|with|under|up to|at most|by|on (?:price|fit|condition|size)|in size)\b|,", details, maxsplit=1, flags=re.I)[0].strip()
+    item = REPEAT_SUFFIX.sub("", item)
+    reference = re.split(r"\s+(?:on|based on|according to)\b", item, maxsplit=1, flags=re.I)[0]
+    if OPTION_REFERENCE_ONLY.fullmatch(reference) or NON_ITEM_START.match(item):
+        return ""
+    return re.sub(r"^(?:both |these |those |some |a pair of |a gift of |a |an )", "", item, flags=re.I)
+
+
 def request_constraints(text, brief=None):
     """Read explicit constraints and retain conflicts in the request's scope."""
     if withdrawn_task_correction(text):
@@ -276,17 +301,14 @@ def request_constraints(text, brief=None):
                 values.setdefault("recipient", {})[recipient_scope(recipient[1])] = recipient[1]
             if cap := re.search(r"\b(?:under|up to|at most)\s+" + PRICE, details, re.I):
                 values.setdefault("budget", {})[normalize(cap[1])] = cap[1]
-            item = re.split(r"\s+(?:for|with|under|up to|at most|by|in size)\b|,", details, maxsplit=1, flags=re.I)[
-                0
-            ].strip()
-            if re.fullmatch(OPTION_REFERENCE + r"(?: again)?", item, re.I):
+            item = shopping_item(details)
+            if not item:
                 continue
-            item = re.sub(r"^(?:both |these |those |some |a pair of |a gift of |a |an )", "", item, flags=re.I)
             if re.fullmatch(r"[A-Z][\w-]+(?: (?:and|or) [A-Z][\w-]+)+", item):
                 # Comparisons between supplied labels carry no item evidence.
                 continue
-            if brief and re.match(r"[A-Z]", item) and any(
-                option["value"].casefold().startswith(item.casefold() + " ") for option in brief["options"]
+            if brief and any(
+                re.match(re.escape(item) + r"(?=\s|[:(]|$)", option["value"], re.I) for option in brief["options"]
             ):
                 continue
             for candidate in re.split(r"\s+(?:and|or)\s+", item, flags=re.I):
@@ -511,7 +533,8 @@ def bound_answer(text, parent, brief, turn, state):
 
 
 VAGUE_TASK = re.compile(
-    r"^(?:(?:(?:can|could|would) you )?(?:please )?(?:compare|pick|choose) " + OPTION_REFERENCE + r"\b|"
+    r"^(?:(?:(?:can|could|would) you )?(?:please )?(?:compare|pick|choose) (?:"
+    + OPTION_REFERENCE + "|" + REPEAT_REQUEST + r")\b|"
     r"which (?:option|one|fits|works|is better|of (?:the|these|those))|"
     r"(?:continue|resume|pick up|back to) (?:where|my|the|that|this)|what about (?:that|those|the other))", re.I,
 )
@@ -578,8 +601,10 @@ def resolve_scope(turn, state, active, previous):
         return TurnScope(active, constraints, clarification=BRIEF_DETAILS)
     retire = (
         brief is not None and not unclear_recipient(text, scope)
-        and any(key in scope for key in ("item", "recipient"))
-        and not brief_matches_request(brief, text, scope)
+        and (
+            not brief_item_matches(brief, scope)
+            or ("recipient" in scope and recipient_scope(scope["recipient"]) != recipient_scope(brief_recipient(brief)))
+        )
     )
     return TurnScope(active, constraints, answer, retire)
 
@@ -736,6 +761,8 @@ OPTION_DESCRIPTION = re.compile(
 LISTING_ATTRIBUTION = re.compile(
     r"\b(?:listing|seller|option)(?: [A-Z0-9]+)? (?:says|reads|lists|describes it as)\s*:?\s*$", re.I,
 )
+PARENTHETICAL_OPTION = r"\s*\(([^()\r\n]+)\)"
+RECOMMENDATION_LEAD = re.compile(r"^(?:pick|choose|recommend|go with)\s+(?:the\s+)?", re.I)
 NON_OPTION_LABELS = {"i", "we", "you", "your", "my", "our", "it", "this", "that", "both", "which", "what"}
 
 
@@ -760,6 +787,24 @@ LISTING_CLAIMS = {
 }
 
 
+PARENTHETICAL_FIELDS = {
+    "price": (re.compile(PRICE), amount),
+    "size": (SIZE_MENTION, size_token),
+    "condition": (
+        re.compile(rf"(?:^|[,;])\s*(?:condition\s*:?\s*)?({CONDITION_VALUE})\s*(?=$|[,;])", re.I),
+        condition_token,
+    ),
+}
+
+
+def parenthetical_facts(details):
+    return {
+        field: {canonical(value) for value in pattern.findall(details)}
+        for field, (pattern, canonical) in PARENTHETICAL_FIELDS.items()
+        if pattern.search(details)
+    }
+
+
 def option_name(label):
     name = normalize(label).removeprefix("the ")
     if name.split()[0] not in NON_OPTION_LABELS:
@@ -774,39 +819,79 @@ def listing_facts(sources):
             for label, value in re.findall(OPTION_LABEL + claim, source):
                 if name := option_name(label):
                     facts.setdefault(name, {}).setdefault(field, set()).add(canonical(value))
+    for source in sources:
+        for label, details in re.findall(OPTION_LABEL + PARENTHETICAL_OPTION, source):
+            if name := option_name(label):
+                for field, values in parenthetical_facts(details).items():
+                    facts.setdefault(name, {}).setdefault(field, set()).update(values)
     return facts
 
 
+SHOPPER_CONSTRAINT = re.compile(
+    "(?:" + "|".join(CONSTRAINTS.values()) + r")(?=$|[,;:]|\s+(?:and|but)\b)", re.I,
+)
+
+
+def shopper_constraint_spans(source):
+    # Keep the inbound offsets while hiding quoted seller text from personal-constraint parsing.
+    unquoted = QUOTATIONS.sub(lambda quote: " " * len(quote[0]), source)
+    boundaries = [(separator.start(), separator.end()) for separator in MESSAGE_SEPARATORS.finditer(unquoted)]
+    boundaries.append((len(unquoted), len(unquoted)))
+    start = 0
+    for end, next_start in boundaries:
+        raw = unquoted[start:end]
+        clause = without_greeting(raw.strip(" ,"))
+        if clause:
+            offset = start + raw.index(clause)
+            if task_correction(clause) or RECIPIENT_SIZE.fullmatch(clause) or PRONOUN_SIZE.fullmatch(clause):
+                yield offset, offset + len(clause)
+            elif constraint := SHOPPER_CONSTRAINT.match(clause):
+                yield offset, offset + constraint.end()
+        start = next_start
+
+
 def is_supplied_option(value, text):
-    if not scope_mentioned(value.casefold(), text.casefold()):
+    personal = tuple(shopper_constraint_spans(text))
+    occurrences = [
+        match for match in re.finditer(r"(?<!\w)" + re.escape(value) + r"(?!\w)", text, re.I)
+        if all(match.end() <= start or match.start() >= end for start, end in personal)
+    ]
+    if not occurrences:
         return False
-    unquoted = {normalize(clause) for clause in message_clauses(text)}
-    if any(
-        normalize(clause) in unquoted and any(re.fullmatch(pattern, clause, re.I) for pattern in CONSTRAINTS.values())
-        for clause in message_clauses(value)
+    clauses = [clause for clause in message_clauses(value) if clause]
+    if clauses and all(
+        listing_facts([clause]) or any(option_name(label) for label in OPTION_DESCRIPTION.findall(clause))
+        for clause in clauses
     ):
-        return False
-    if listing_facts([value]) or any(option_name(label) for label in OPTION_DESCRIPTION.findall(value)):
         return True
     # Standalone listing details need an explicit seller/listing attribution.
     if not re.fullmatch(rf"(?:size {SIZE_VALUE}|{PRICE_AMOUNT}|{CONDITION_VALUE})", value, re.I):
         return False
     return any(
-        scope_mentioned(value.casefold(), quote[0].casefold()) and LISTING_ATTRIBUTION.search(text[:quote.start()])
+        LISTING_ATTRIBUTION.search(text[:quote.start()])
+        and any(quote.start() < match.start() and match.end() < quote.end() for match in occurrences)
         for quote in QUOTATIONS.finditer(text)
     )
+
+
+def facts_supported(claims, evidence):
+    return all(values <= evidence.get(field, set()) for field, values in claims.items())
 
 
 def listing_claims_match(reply, sources):
     supplied = listing_facts(sources)
     for name, claims in listing_facts([reply]).items():
-        if any(not values <= supplied.get(name, {}).get(field, set()) for field, values in claims.items()):
+        option = name if name in supplied else RECOMMENDATION_LEAD.sub("", name)
+        if not facts_supported(claims, supplied.get(option, {})):
             return False
     # Also match case-insensitive references to labels identified in the supplied listings.
     for name, evidence in supplied.items():
+        label = r"\b" + re.escape(name)
         for field, (claim, canonical) in LISTING_CLAIMS.items():
-            named_claim = r"\b" + re.escape(name) + claim
-            if any(canonical(match) not in evidence.get(field, ()) for match in re.findall(named_claim, reply, re.I)):
+            if any(canonical(match) not in evidence.get(field, ()) for match in re.findall(label + claim, reply, re.I)):
+                return False
+        for details in re.findall(label + PARENTHETICAL_OPTION, reply, re.I):
+            if not facts_supported(parenthetical_facts(details), evidence):
                 return False
     return True
 
