@@ -3,11 +3,11 @@
 from datetime import datetime, timedelta, timezone
 import json
 from unittest.mock import Mock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
-from tbd_server.agent import harness
+from tbd_server.agent import harness, memory, policy
 
 
 def turn(text):
@@ -38,6 +38,27 @@ def state(inbound):
     }
 
 
+def scope_cursor(active, parents=()):
+    cur = Mock()
+    brief = active["brief"]
+    if brief:
+        ids = [brief["id"]]
+        for entry in (*brief["fields"].values(), *brief["options"]):
+            entry["source"] = brief["id"]
+        at = datetime.fromisoformat(brief["activity_at"])
+        sources = [
+            {"id": uuid, "queue_sequence": 1, "source_at": at, "text": "Compare shoes"}
+            for uuid in map(UUID, ids)
+        ]
+    else:
+        sources = []
+    cur.execute.side_effect = [
+        Mock(**{"fetchall.return_value": list(parents)}),
+        Mock(**{"fetchall.return_value": sources}),
+    ]
+    return cur
+
+
 def generated(reply="Here's what fits.", brief="unchanged", edits=(), question=None):
     return json.dumps({"reply": reply, "brief": brief, "edits": list(edits), "question": question})
 
@@ -45,17 +66,17 @@ def generated(reply="Here's what fits.", brief="unchanged", edits=(), question=N
 def test_explicit_preference_writes_are_scoped_and_pause_resets_context():
     inbound = turn("Remember size for shoes for me is 8 wide")
     context = state(inbound)
-    assert harness.memory_control(inbound["text"], context, inbound) == "I saved that standing preference."
+    assert memory.memory_control(inbound["text"], context, inbound) == "I saved that standing preference."
     assert context["preferences"]["shoes|me|size"]["value"] == "8 wide"
-    assert harness.memory_control("My seller said “forget size for shoes for me”", context, inbound) is None
-    no_match = harness.memory_control("forget material for hat for me; compare these", context, inbound)
+    assert "confirm" in memory.memory_control("My seller said “forget size for shoes for me”", context, inbound)
+    no_match = memory.memory_control("forget material for hat for me; compare these", context, inbound)
     assert "no saved preference" in no_match and "resend" in no_match
     assert context["reset_sequence"] == inbound["queue_sequence"]
     assert not harness.after_reset(inbound, context)
-    assert harness.memory_control("pause memory", context, inbound) == "Preference memory is paused."
-    assert "paused" in harness.memory_control("save size for shoes for me is 9", context, inbound)
-    assert "8 wide" in harness.memory_control("show my preferences", context, inbound)
-    harness.memory_control("forget size for shoes for me", context, inbound)
+    assert memory.memory_control("pause memory", context, inbound) == "Preference memory is paused."
+    assert "paused" in memory.memory_control("save size for shoes for me is 9", context, inbound)
+    assert "8 wide" in memory.memory_control("show my preferences", context, inbound)
+    memory.memory_control("forget size for shoes for me", context, inbound)
     assert not context["preferences"]
 
 
@@ -64,50 +85,51 @@ def test_both_times_must_show_reply_before_typed_answer(source_shift, created_sh
     inbound = turn("9")
     active = state(inbound)
     active["brief"] = {
-        "id": "opening",
+        "id": str(uuid4()),
         "fields": {"item": {"value": "shoes"}},
         "options": [],
         "activity_at": (inbound["source_at"] - timedelta(minutes=2)).isoformat(),
     }
     parent = {
+        "id": uuid4(),
         "text": "Compare shoes",
         "outcome": "model",
         "source_at": inbound["source_at"] - timedelta(minutes=1),
+        "created_at": inbound["source_at"] - timedelta(minutes=1),
         "queue_sequence": 2,
         "reply": "What size should I use?",
-        "question": {"brief_id": "opening", "field": "size", "value": None},
+        "question": {"brief_id": active["brief"]["id"], "field": "size", "value": None},
         "sent_observed_at": inbound["source_at"],
     }
     inbound["source_at"] += timedelta(seconds=source_shift)
     inbound["created_at"] += timedelta(seconds=created_shift)
-    cur = Mock()
-    cur.execute.return_value.fetchall.return_value = [parent]
-    prompt, _, answer, _ = harness.context(cur, inbound, active)
-    assert bool(prompt) == expected
-    assert answer == ({"size": "9"} if expected else None)
+    projection = harness.context(scope_cursor(active, [parent]), inbound, active)
+    assert bool(projection.prompt) == expected
+    assert projection.scope.answer == ({"size": "9"} if expected else None)
 
 
 def test_intervening_turn_blocks_a_previously_visible_question():
     inbound = turn("yes")
     active = state(inbound)
     active["brief"] = {
-        "id": "opening",
+        "id": str(uuid4()),
         "fields": {"item": {"value": "shoes"}},
         "options": [],
         "activity_at": (inbound["source_at"] - timedelta(minutes=2)).isoformat(),
     }
     parent = {
+        "id": uuid4(),
         "text": "Compare shoes",
         "outcome": "model",
         "source_at": inbound["source_at"] - timedelta(minutes=1),
+        "created_at": inbound["source_at"] - timedelta(minutes=1),
         "queue_sequence": 1,
         "reply": "Is 8 the right size?",
-        "question": {"brief_id": "opening", "field": "size", "value": "8"},
+        "question": {"brief_id": active["brief"]["id"], "field": "size", "value": "8"},
         "sent_observed_at": inbound["source_at"] - timedelta(seconds=5),
     }
-    cur = Mock()
-    cur.execute.return_value.fetchall.return_value = [{**parent, "outcome": "control", "queue_sequence": 2}, parent]
-    assert harness.context(cur, inbound, active)[0] is None
+    cur = scope_cursor(active, [{**parent, "outcome": "control", "queue_sequence": 2}, parent])
+    assert harness.context(cur, inbound, active).prompt is None
 
 
 @pytest.mark.parametrize(
@@ -129,25 +151,27 @@ def test_full_prompt_budget_and_optional_context_trimming():
     cur = Mock()
     cur.execute.return_value.fetchall.return_value = [
         {
-            "text": "Z" * 20000,
+            "id": uuid4(),
+            "text": "My name is " + "Z" * 20000,
             "outcome": "fallback",
             "source_at": inbound["source_at"] - timedelta(seconds=5),
+            "created_at": inbound["source_at"] - timedelta(seconds=5),
             "queue_sequence": 1,
             "sent_observed_at": None,
             "reply": "Exclude me",
         }
     ]
-    prompt, _, _, _ = harness.context(cur, inbound, state(inbound))
+    prompt = harness.context(cur, inbound, state(inbound)).prompt
     assert json.loads(prompt)["recent"] == []
     inbound["text"] *= harness.PROMPT_BYTES
-    assert harness.context(cur, inbound, state(inbound))[0] is None
+    assert harness.context(cur, inbound, state(inbound)).prompt is None
 
 
 def test_scoped_preferences_and_gift_exception():
     inbound = turn("Compare these shoes for my sister")
     active = state(inbound)
     active["brief"] = {
-        "id": "opening",
+        "id": str(uuid4()),
         "fields": {"item": {"value": "shoes"}},
         "options": [],
         "activity_at": (inbound["source_at"] - timedelta(minutes=2)).isoformat(),
@@ -158,19 +182,17 @@ def test_scoped_preferences_and_gift_exception():
         "shoes|sister|material": {"value": "cotton"},
         "hats|sister|size": {"value": "small"},
     }
-    cur = Mock()
-    cur.execute.return_value.fetchall.return_value = []
     inbound["text"] += " and tell me what fits"
-    prompt, _, _, _ = harness.context(cur, inbound, active)
+    prompt = harness.context(scope_cursor(active), inbound, active).prompt
     assert json.loads(prompt)["brief"] is None
     assert json.loads(prompt)["preferences"] == [
         {"item": "shoes", "recipient": "sister", "key": "material", "value": "cotton"},
     ]
     active["brief"]["fields"]["recipient"] = {"value": "my sister"}
-    prompt, _, _, _ = harness.context(cur, inbound, active)
-    assert json.loads(prompt)["brief"]["id"] == "opening"
+    prompt = harness.context(scope_cursor(active), inbound, active).prompt
+    assert json.loads(prompt)["brief"]["id"] == active["brief"]["id"]
     inbound["text"] = "Which shoes would be warmer?"
-    prompt, _, _, _ = harness.context(cur, inbound, active)
+    prompt = harness.context(scope_cursor(active), inbound, active).prompt
     assert [p["recipient"] for p in json.loads(prompt)["preferences"]] == ["sister"]
 
 
@@ -194,6 +216,7 @@ def test_model_edits_require_current_evidence_and_distinguish_option_price():
         raw.replace("Here's what fits.", "I saved that preference."),
         raw.replace("Here's what fits.", "What is your budget?"),
         raw.replace('"shoes"', '"boots"'),
+        raw.replace("Seller A asks $80", "My budget is $65"),
     ):
         with pytest.raises(harness.INVALID_RESULT):
             harness.validate(invalid, inbound, None, None)
@@ -243,7 +266,10 @@ def test_thin_adapter_stateless_request_and_usage(monkeypatch, status, output_st
         return client(transport=httpx.MockTransport(handler))
 
     monkeypatch.setattr(adapter.httpx, "AsyncClient", controlled)
-    result = asyncio.run(adapter.OpenAI("synthetic")("synthetic-model", "synthetic message", 100, 1))
+    request = adapter.InferenceRequest(
+        "synthetic-model", harness.INSTRUCTIONS, "synthetic message", harness.Result.model_json_schema(), 100,
+    )
+    result = asyncio.run(adapter.OpenAI("synthetic")(request, 1))
     assert result.retryable is retryable and result.usage == usage
     assert bool(result.output) == (output_status == "completed")
 
@@ -254,7 +280,7 @@ def test_thin_adapter_stateless_request_and_usage(monkeypatch, status, output_st
         ("budget", "My budget is $65 and the seller asks $80.", "$65", "$80", "the seller asks $80"),
         ("budget", "My budget is $65, but the seller asks $80.", "$65", "$80", "the seller asks $80"),
         ("size", "Listing A is size 8 but I need size 10.", "10", "8", "Listing A is size 8"),
-        ("size", "The listing says “I need size 8”. My size is 10.", "10", "8", "I need size 8"),
+        ("size", "The listing says “Size 8”. My size is 10.", "10", "8", "Size 8"),
         ("condition", "Seller describes it as new. I prefer used.", "used", "new", "Seller describes it as new"),
     ],
 )
@@ -308,7 +334,7 @@ def test_conflicting_memory_command_preserves_preference_brief_and_cutoffs(comma
     active["reset_sequence"] = 2
     active["reset_source_at"] = inbound["source_at"] - timedelta(minutes=2)
     before = deepcopy(active)
-    assert "confirm" in harness.memory_control(command, active, inbound)
+    assert "confirm" in memory.memory_control(command, active, inbound)
     assert active == before
 
 
@@ -328,16 +354,15 @@ def test_gift_to_a_friend_excludes_self_preferences_and_brief():
     inbound = turn("Compare these shoes for a friend")
     active = state(inbound)
     active["brief"] = {
-        "id": "opening",
+        "id": str(uuid4()),
         "fields": {"item": {"value": "shoes"}, "size": {"value": "8"}},
         "options": [],
         "activity_at": inbound["source_at"].isoformat(),
     }
     active["preferences"] = {"shoes|me|size": {"value": "8"}}
-    cur = Mock()
-    cur.execute.return_value.fetchall.return_value = []
-    prompt, original_brief, _, _ = harness.context(cur, inbound, active)
-    projected = json.loads(prompt)
+    projection = harness.context(scope_cursor(active), inbound, active)
+    original_brief = projection.scope.brief
+    projected = json.loads(projection.prompt)
     assert projected["brief"] is None and projected["preferences"] == []
     assert projected["current_constraints"]["recipient"] == "a friend"
     edits = [{"field": "item", "value": "shoes"}, {"field": "recipient", "value": "a friend"}]
@@ -375,12 +400,10 @@ def test_brief_expiry_uses_accepted_edit_time_and_read_only_turn_does_not_renew(
         "options": [],
         "activity_at": (inbound["source_at"] - harness.BRIEF_AGE - timedelta(seconds=1)).isoformat(),
     }
-    cur = Mock()
-    cur.execute.return_value.fetchall.return_value = []
-    prompt, brief, _, _ = harness.context(cur, inbound, active)
-    assert brief is None and json.loads(prompt)["brief"] is None
+    projection = harness.context(scope_cursor(active), inbound, active)
+    assert projection.scope.brief is None and json.loads(projection.prompt)["brief"] is None
     active["brief"]["activity_at"] = active["watermark"].isoformat()
-    _, usable, _, _ = harness.context(cur, inbound, active)
+    usable = harness.context(scope_cursor(active), inbound, active).scope.brief
     _, unchanged, _ = harness.validate(generated(), inbound, usable, None)
     assert unchanged == active["brief"]
 
@@ -447,17 +470,84 @@ def test_paid_gift_replay_misses_render_an_open_recipient_size_question(prematur
         "options": [],
         "activity_at": inbound["source_at"].isoformat(),
     }
-    cur = Mock()
-    cur.execute.return_value.fetchall.return_value = []
-    prompt, brief, answer, require_gift_size = harness.context(cur, inbound, active)
-    assert json.loads(prompt)["brief"] is None and require_gift_size
+    projection = harness.context(scope_cursor(active), inbound, active)
+    assert json.loads(projection.prompt)["brief"] is None and projection.require_gift_size
     reply, saved, question = harness.validate(
         generated(reply=premature_reply),
         inbound,
-        brief,
-        answer,
-        require_gift_size=require_gift_size,
+        projection.scope.brief,
+        projection.scope.answer,
+        require_gift_size=projection.require_gift_size,
     )
     assert reply.startswith("What size does the recipient wear?")
     assert "Maple" not in reply and "Oak" not in reply
     assert saved == active["brief"] and question is None
+
+
+@pytest.mark.parametrize("withdrawal", [
+    ". Actually, keep size 8.",
+    ", actually keep size 8.",
+    " but don't change it.",
+    ". Actually, never mind about that.",
+])
+def test_withdrawn_task_correction_has_no_edit_evidence(withdrawal):
+    correction = "Correct size for shoes for me to 10 for this purchase"
+    brief = {"id": "opening", "fields": {"item": {"value": "shoes"}, "size": {"value": "8"}}, "options": []}
+    proposal = generated(brief="update", edits=[{"field": "size", "value": "10"}])
+    inbound = turn(correction + withdrawal)
+    assert harness.current_constraints(inbound["text"], brief) == {}
+    with pytest.raises(harness.BriefEvidenceError, match="withdrawn"):
+        harness.validate(proposal, inbound, brief, None)
+    _, updated, _ = harness.validate(proposal, turn(correction), brief, None)
+    assert updated["fields"]["size"]["value"] == "10"
+    assert brief["fields"]["size"]["value"] == "8"
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Do you remember my name? My TBD account is active.", None),
+    ("What name is on Alex’s TBD account?", None),
+    ("What name is listed on my TBD account?", "read"),
+    ("What's my TBD profile's display name?", "read"),
+    ("Can you tell me what name is on my profile?", "read"),
+    ("How can I change my TBD account display name?", "edit"),
+])
+def test_profile_request_names_explicit_own_profile(text, expected):
+    assert policy.profile_request(text) == expected
+
+
+@pytest.mark.parametrize("reply", ["I’m ChatGPT.", "I am Claude, here to help.", "My name is Avery."])
+def test_conflicting_assistant_identity_is_rejected(reply):
+    inbound = turn("Hi TBD!")
+    with pytest.raises(ValueError, match="Invalid reply"):
+        harness.validate(generated(reply=reply), inbound, None, None)
+    assert harness.validate(generated(reply="I’m TBD, your shopping assistant."), inbound, None, None)[0].startswith(
+        "I’m TBD"
+    )
+
+
+@pytest.mark.parametrize("reply", ["You’re chatting with your TBD shopping assistant.", "I’m happy to help."])
+def test_assistant_can_describe_its_role(reply):
+    assert harness.validate(generated(reply=reply), turn("Hi TBD!"), None, None)[0] == reply
+
+
+@pytest.mark.parametrize("separator", [". ", ", "])
+def test_retaining_budget_preserves_size_correction_evidence(separator):
+    inbound = turn(f"Correct size for shoes for me to 10 for this purchase{separator}keep the budget at $90.")
+    brief = {
+        "id": "opening", "options": [],
+        "fields": {"item": {"value": "shoes"}, "size": {"value": "8"}, "budget": {"value": "$90"}},
+    }
+    proposal = generated(brief="update", edits=[{"field": "size", "value": "10"}])
+    _, updated, _ = harness.validate(proposal, inbound, brief, None)
+    assert updated["fields"]["size"]["value"] == "10"
+    assert updated["fields"]["budget"] == brief["fields"]["budget"]
+
+
+def test_size_after_listed_price_is_bound_to_its_option():
+    inbound = turn("Compare shoes. Aspen costs $80, size 8. Birch costs $105, size 10.")
+    active = state(inbound)
+    prompt = harness.context(scope_cursor(active), inbound, active).prompt
+    with pytest.raises(ValueError, match="listing claim conflicts"):
+        harness.validate(generated(reply="Aspen comes in size 10."), inbound, None, None, prompt=prompt)
+    reply, _, _ = harness.validate(generated(reply="Aspen comes in size 8."), inbound, None, None, prompt=prompt)
+    assert reply == "Aspen comes in size 8."

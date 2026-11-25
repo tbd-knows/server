@@ -11,26 +11,33 @@ from pydantic import ValidationError
 from psycopg.rows import dict_row
 
 from tbd_server.messaging.runtime import emit
+from tbd_server.user.store import Store
 
-from . import harness
-from .adapter import Generation
+from . import harness, memory, policy
+from .adapter import Adapter, Generation, InferenceRequest
 from .store import HEAD, approved, current_state, finish, lock_user, now, route
 
 
-def execution_config(model):
+def execution_config(model, *, adapter="openai-responses-v1"):
     return {
         "model": model,
-        "prompt": 6,
-        "schema": 1,
+        "adapter": adapter,
+        "prompt": policy.POLICY_VERSION,
+        "context": harness.CONTEXT_VERSION,
+        "schema": harness.SCHEMA_VERSION,
+        "store": False,
+        "attempts": 2,
         "deadline": 24,
         "lease": 10,
         "max_output": 1200,
         "prompt_bytes": harness.PROMPT_BYTES,
+        "skew": harness.SKEW.total_seconds(),
+        "brief_age": harness.BRIEF_AGE.total_seconds(),
     }
 
 
 class AgentRunner:
-    def __init__(self, database_url, account, pairs, config, adapter=None):
+    def __init__(self, database_url, account, pairs, config, adapter: Adapter | None = None):
         self.database_url, self.account, self.pairs = database_url, account, dict(pairs)
         self.config, self.adapter = config, adapter
         self.stopped = Event()
@@ -109,7 +116,7 @@ class AgentRunner:
                 return False
             if turn["granted_at"] is not None:
                 emit("agent_recovered_grant", inbound_id=turn["id"], attempt_id=turn["agent_attempt"])
-            settled, reason = self.local(cur, turn, state, at)
+            settled, reason = self.local(cur, turn, user, state, at)
             if not settled:
                 token = uuid4()
                 cur.execute(
@@ -133,9 +140,9 @@ class AgentRunner:
         # Assemble and grant in separate transactions to recheck all fences
         # after context work. An unconfirmed grant never reaches the provider.
         with self.transaction() as cur:
-            prompt, brief, answer, require_gift_size = harness.context(cur, turn, state)
-        if prompt is None:
-            self.complete(turn, token, Generation(), brief, answer, local=True)
+            projection = harness.context(cur, turn, state)
+        if projection.prompt is None:
+            self.complete(turn, token, Generation(), projection)
             return True
         granted = monotonic()
         with self.transaction() as cur:
@@ -151,9 +158,14 @@ class AgentRunner:
         emit("agent_dispatch", inbound_id=turn["id"], attempt_id=token, config=self.config)
         inference_started = monotonic()
 
+        request = InferenceRequest(
+            self.config["model"], harness.INSTRUCTIONS, projection.prompt,
+            harness.Result.model_json_schema(), self.config["max_output"],
+        )
+
         async def bounded():
             async with asyncio.timeout(timeout):
-                return await self.adapter(self.config["model"], prompt, self.config["max_output"], timeout)
+                return await self.adapter(request, timeout)
 
         try:
             result = asyncio.run(bounded())
@@ -174,7 +186,7 @@ class AgentRunner:
             usage=result.usage,
             reason=result.reason,
         )
-        self.complete(turn, token, result, brief, answer, require_gift_size=require_gift_size)
+        self.complete(turn, token, result, projection)
         return True
 
     @staticmethod
@@ -194,7 +206,7 @@ class AgentRunner:
             and head["execution_config"] == self.config
         )
 
-    def local(self, cur, turn, state, at):
+    def local(self, cur, turn, user, state, at):
         text = turn["text"]
         fresh = harness.fresh(turn, state)
         reason = None
@@ -204,30 +216,46 @@ class AgentRunner:
             outcome, reply = "stale", harness.RESTATEMENT
         elif state["mode"] == "fallback":
             reason = "operator_fallback"
-            control = harness.memory_control(
-                text,
-                {
-                    **state,
-                    "preferences": dict(state["preferences"]),
-                },
-                turn,
-            )
             outcome, reply = (
                 ("control", "Preference controls are temporarily unavailable.")
-                if control
-                else (
-                    "fallback",
-                    harness.FALLBACK,
-                )
+                if memory.is_memory_input(text) or policy.close_intent(text)
+                else ("fallback", harness.FALLBACK)
             )
-        elif control := harness.memory_control(text, state, turn):
-            outcome, reply = "control", control
-        elif harness.ACTION.search(text.strip()):
-            outcome, reply = "transaction", harness.TRANSACTION
-        elif conflicts := harness.request_constraints(text)[1]:
-            outcome, reply = "fallback", harness.SCOPE_CLARIFICATIONS[conflicts]
-            reason = "scope_conflict"
         else:
+            action = policy.unsupported_action(text)
+            close = policy.close_intent(text)
+            if close == "clarify" or harness.withdrawn_task_correction(text):
+                outcome, reply = "control", harness.KEEP_BRIEF + (" " + harness.TRANSACTION if action else "")
+            elif control := memory.memory_control(text, state, turn):
+                outcome, reply = "control", control + (" " + harness.TRANSACTION if action else "")
+            elif close == "close":
+                reply = harness.CLOSED if state["brief"] is not None else harness.NO_BRIEF
+                state["brief"] = None
+                outcome, reply = "control", reply + (" " + harness.TRANSACTION if action else "")
+            else:
+                outcome, reply, reason = self.local_reply(cur, turn, user, state, at, action)
+                if outcome is None:
+                    return None, None
+        finish(cur, turn, state, outcome, reply, fresh=fresh)
+        return outcome, reason
+
+    def local_reply(self, cur, turn, user, state, at, action):
+        text = turn["text"]
+        if action:
+            outcome, reply, reason = "transaction", harness.TRANSACTION, None
+        elif profile := policy.profile_request(text):
+            if profile == "edit":
+                reply = "Your display name is managed in your TBD account."
+            else:
+                name = Store.display_name(cur, user["id"])
+                reply = f"User Service lists your TBD account display name as {name}."
+            outcome, reason = "control", None
+        elif reply := policy.direct_reply(text):
+            outcome, reason = "control", None
+        elif policy.bare_link(text):
+            outcome, reply, reason = "control", harness.LINK_DETAILS, None
+        else:
+            outcome, reply, reason = "fallback", harness.FALLBACK, None
             if at >= turn["inference_deadline"]:
                 reason = "inference_deadline"
             elif not turn["attempts_left"]:
@@ -235,15 +263,28 @@ class AgentRunner:
             elif not self.adapter or turn["execution_config"] != self.config:
                 reason = "inference_unavailable"
             else:
-                return None, None
-            outcome, reply = "fallback", harness.FALLBACK
-        finish(cur, turn, state, outcome, reply, fresh=fresh)
-        return outcome, reason
+                return None, None, None
 
-    def complete(self, turn, token, result, brief, answer, *, local=False, require_gift_size=False):
+        if state["brief"] is not None or outcome == "fallback":
+            active = harness.brief_in_use(cur, turn, state)
+            prior = (
+                harness.previous_turns(cur, turn)
+                if active and harness.short_answer(text) else ()
+            )
+            scope = harness.resolve_scope(turn, state, active, prior)
+            if scope.retire:
+                state["brief"] = None
+            if outcome == "fallback" and scope.clarification:
+                reply, reason = scope.clarification, "scope_restatement"
+        return outcome, reply, reason
+
+    def complete(self, turn, token, result, projection):
         started = monotonic()
         outcome = "fallback"
-        reply = harness.RESTATEMENT if local else harness.FALLBACK
+        scope = projection.scope
+        local = projection.prompt is None
+        brief = scope.brief
+        reply = (scope.clarification or harness.RESTATEMENT) if local else harness.FALLBACK
         target = None
         brief_field = None
         reason = "context_restatement" if local else result.reason or "provider_unreadable"
@@ -253,8 +294,9 @@ class AgentRunner:
                     result.output,
                     turn,
                     brief,
-                    answer,
-                    require_gift_size=require_gift_size,
+                    scope.answer,
+                    require_gift_size=projection.require_gift_size,
+                    prompt=projection.prompt,
                 )
                 outcome, reason = "model", None
             except ValidationError as exc:
@@ -279,8 +321,10 @@ class AgentRunner:
                         (turn["id"],),
                     )
                     return False
-                if outcome == "model":
+                if outcome == "model" and (not scope.retire or brief != scope.brief):
                     state["brief"] = brief
+                elif scope.retire:
+                    state["brief"] = None
                 finish(cur, head, state, outcome, reply, fresh=True, question=target)
         except psycopg.Error:
             # The connection may have been lost after COMMIT. Never repeat an

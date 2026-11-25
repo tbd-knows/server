@@ -80,6 +80,11 @@ class Store:
         return row
 
     @staticmethod
+    def display_name(cur, user_id):
+        """Read the resolved User's display name in the caller's transaction."""
+        return cur.execute("SELECT name FROM user_service.users WHERE id=%s", (user_id,)).fetchone()["name"]
+
+    @staticmethod
     def bump(cur, user_id):
         cur.execute("UPDATE users SET revision=revision+1 WHERE id=%s", (user_id,))
 

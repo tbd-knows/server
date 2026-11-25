@@ -50,8 +50,8 @@ def admit(cur, inbound, config):
     cur.execute(
         """INSERT INTO agent_service.turns
         (inbound_id,enrollment_id,inference_deadline,execution_config,attempts_left)
-        VALUES (%s,%s,clock_timestamp() + make_interval(secs => %s),%s,2)""",
-        (inbound["id"], state["enrollment_id"], config["deadline"], Jsonb(config)),
+        VALUES (%s,%s,clock_timestamp() + make_interval(secs => %s),%s,%s)""",
+        (inbound["id"], state["enrollment_id"], config["deadline"], Jsonb(config), config["attempts"]),
     )
     return True
 

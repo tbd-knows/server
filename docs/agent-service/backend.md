@@ -4,7 +4,7 @@ Agent enrolls one approved conversation per joined User. Messaging records the i
 
 ## Configuration
 
-Apply `20261119110533_agent_service.sql` before deploying the compatible backend. The migration adds the private `agent_service` schema and grants access to `tbd_user_backend`. The migration can stay applied throughout rollback.
+Apply `20261119110533_agent_service.sql` before deploying the compatible backend. The migration adds the private `agent_service` schema and grants access to `tbd_user_backend`. The migration can stay applied throughout rollback. Agentification uses the same private tables and needs no additional migration.
 
 The deployed program reads the existing Messaging line and conversation allowlist. New Users start in Fixed. The app can run without either Agent environment variable.
 
@@ -13,29 +13,31 @@ The deployed program reads the existing Messaging line and conversation allowlis
 
 The adapter uses foreground OpenAI Responses requests with `store: false` and a strict schema. Provider abuse-monitoring retention depends on the API project's data controls. Verify the pilot project's settings before real User traffic. [OpenAI data controls](https://developers.openai.com/api/docs/guides/your-data)
 
-Each turn pins the model, prompt and schema revisions, and resource limits. The initial limits are two possible attempts, a ten-second attempt lease, a 24-second admission deadline, 1,200 output tokens, and a 16,000-byte budget for projected inputs, instructions, and schema. The initial timestamp allowance is two seconds and a brief expires seven days after its last accepted edit. Earlier briefs derive that time from their stored inbound provenance. Tune these with controlled evidence. Drain to Fixed before changing incompatible inference configuration.
+Each turn pins the TBD-selected model, adapter, behavior policy, context rules, output schema, response storage setting, and resource limits. The stateless adapter receives only the bounded authorized context and returns a proposal or a failure with available usage. The initial limits are two possible attempts, a ten-second attempt lease, a 24-second admission deadline, 1,200 output tokens, and a 16,000-byte budget for projected inputs, instructions, and schema. The initial timestamp allowance is two seconds and a brief expires seven days after its last accepted edit. The runner verifies brief sources against the current enrollment, exact route, and privacy cutoffs. Earlier briefs derive their last edit from the stored inbound provenance. A task correction also records a sequence in the brief to exclude superseded task history. Tune these with controlled evidence. Drain to Fixed before changing incompatible inference configuration.
 
-Brief constraints require explicit first-party wording such as “My budget is $65” or “I need size 10,” or an eligible answer to a typed question. Listing prices and sizes stay in option entries.
+Brief constraints require explicit first-party wording such as “My budget is $65” or “I need size 10,” or an eligible answer to a typed question. Listing prices and sizes stay in option entries. A clear switch retires the previous brief and question even when inference falls back or only replies. Say “close this brief” to close it locally.
 
 ### Supported preference controls
 
 Specify a preference key, item and recipient. The keys are size, fit, condition, brand, and material. The first-person recipient is `me`.
 
 - `Remember size for shoes for me is 8 wide`
-- `Correct size for shoes for me to 9 wide`
+- `Correct size for shoes for me to 9 wide` for a standing correction
+- `Correct size for shoes for me to 9 wide for this purchase` for a brief edit
+- `Repair size for shoes for me to 9 wide` to clear obsolete recall when the saved value agrees
 - `Show my preferences`
-- `Forget size for shoes for me` or `Forget all preferences`
+- `Forget size for shoes for me`, `Forget all preferences`, or `Forget my name`
 - `Pause memory` or `Resume memory`
 
-The app handles these commands locally. Forget and pause clear the brief and advance both context cutoffs. If combined with a shopping request, the reply asks the User to resend the shopping request.
+The app handles standing preferences and recall controls locally. A first or same-value save keeps the brief. A standing change or resolved alias conflict, authorized repair, forget, and pause clear the brief and advance both context cutoffs with the linked reply. A mixed shopping request needs to be resent after the control settles. The app can show a User their account display name only on explicit request, using User Service. That lookup and its reply stay outside future model input.
 
 ## Cutover and rollback
 
-1. Deploy the compatible revision in Fixed. Verify Join, signed webhook intake, fixed replies and contact cards. Confirm fixed-only webhook and history workers have exited.
-2. With the deployed configuration available privately, run `uv run --locked python scripts/agent_mode.py USER_UUID agent --conversation CONVERSATION` for each approved route. Record the deployed revision and model configuration separately from the test results.
+1. For an incompatible revision such as Agentification, drain every enrollment through Fallback into Fixed before deploying. Deploy the compatible revision in Fixed. Verify Join, signed webhook intake, fixed replies and contact cards. Confirm that all old Agent, webhook, history, and delivery workers have exited and their in-flight calls have settled before re-enrollment.
+2. Before each enrollment or re-enrollment, including on the same route, verify [exact-route delivery settlement](#route-revocation-and-restoration). With the deployed configuration available privately, run `uv run --locked python scripts/agent_mode.py USER_UUID agent --conversation CONVERSATION` for each approved route. Record the deployed revision and model configuration separately from the test results.
 3. For a normal drain, use `agent_mode.py USER_UUID fallback`. Fallback stops new inference and settles pending turns in order. Use `agent_mode.py USER_UUID fixed` after backlog drains. The command checks the backlog under the same User lock as intake. Repeat for each enrollment.
 4. To revoke or restore a route, follow [Route revocation and restoration](#route-revocation-and-restoration).
-5. Before switching to a legacy sender, verify every enrollment is Fixed, all turns are terminal, and all linked outbound messages are in legacy no-POST states. Stop stale compatible workers and wait for in-flight provider requests to end. Keep a guard-compatible build serving until these checks hold.
+5. Before switching to a legacy sender, verify every enrollment is Fixed, all turns are terminal, and all linked outbound messages are in legacy no-POST states. Stop stale compatible workers and wait for in-flight provider requests to end. Keep a guard-compatible build serving until these checks hold. A rollback to Part 1 serves Fixed until a build that enforces the Agentification context and authority rules is ready. Re-enrollment creates a fresh brief and recent context while preserving standing preferences, pause state, and both cutoffs.
 
 The following checks report only counts. Expect zeros before switching to a legacy sender.
 
@@ -99,4 +101,4 @@ The eval outputs recommendation, material question and preference reuse counts, 
 
 The report includes the exact Git SHA and a row per case and repeat with its outcome, fallback reason, and attempt timings. It scores a useful gift size clarification separately from a saved question target. For the approved GPT-5.4 mini snapshot, the report estimates known spend using standard list rates. Spend per useful reply is calculated only when every attempt has priceable usage, and counts useful recommendations, correct no-fit replies, and useful gift clarifications. Reconcile the estimate with billed usage. [OpenAI model rates](https://developers.openai.com/api/docs/models/gpt-5.4-mini)
 
-The separate `commerce-v1-brief-scope` report uses controlled setup turns and two live model turns. It checks a recommendation from a carried shoes brief, then sends a backpack request after observing a shoes question as sent. The report verifies that the old brief and question cannot apply to the backpack request. These turns have their own usage and timing records.
+The separate `commerce-v1-brief-scope` report uses controlled setup turns and two live model turns. It checks a recommendation from a carried shoes brief, then sends a backpack request after observing a shoes question as sent. The report verifies that the old brief and question cannot apply to the backpack request and their state is retired at terminal commit. These turns have their own usage and timing records.
