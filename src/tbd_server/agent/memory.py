@@ -3,8 +3,7 @@
 import re
 
 from .policy import (
-    QUOTED_PLACEHOLDER, RETRACTION, SECRET, SHOPPING_REQUEST, action_clauses, quoted_text, unsupported_action, without_greeting,
-    without_quotes,
+    ACTION, QUOTED_PLACEHOLDER, RETRACTION, SECRET, SHOPPING_REQUEST, quoted_text, without_greeting, without_quotes,
 )
 
 KEYS = ("size", "fit", "condition", "brand", "material")
@@ -29,12 +28,12 @@ MEMORY_CONFLICT = re.compile(
     re.I,
 )
 
-RETENTION_DIRECTIVE = re.compile(
-    r"(?:(?:actually|instead)[, ]+)?(?:please )?(?:just )?(?:keep|retain|leave)\s+"
-    r"(?:(?:(?:all|both|each|any|some|most) of )?(?:it|that|them|those|these)\b"
-    r"|(?:everything|all|both|the rest)(?=$|[,.!?]|\s+(?:instead|unchanged|alone|as)\b))",
+SHOPPING_BUDGET = re.compile(
+    r"(?:(?:please )?keep (?:(?:the|my) )?budget (?:at|under|below|within)|(?:my|the) budget is)"
+    r"\s+\$\s?\d[\d,]*(?:\.\d{2})?",
     re.I,
 )
+REQUEST_INTRODUCTION = re.compile(r"^(?:i|we) (?:want|need) to\s+", re.I)
 
 CONTROL_CLARIFICATION = "Please confirm what you want me to do with your preference memory."
 CONTROL_HEAD = re.compile(
@@ -45,7 +44,8 @@ CONTROL_SPLIT = re.compile(
     r";|\n|[.!?]\s+|,?\s+(?:and|then)\s+(?=(?:(?:please|can you)\s+)?"
     r"(?:compare|find|look|help|show|recommend|buy|order|pay|contact|text|message|check|verify|remember|"
     r"save|correct|repair|forget|pause|resume|close)\b)"
-    r"|(?:,\s*|\s+(?:and|but)\s+)(?=(?:actually|keep|leave|retain|undo|never mind|resume|don[’']t)\b)",
+    r"|(?:,\s*|\s+(?:and|but)\s+)(?=(?:actually|keep|leave|retain|undo|never mind|resume|don[’']t)"
+    r"\b|(?:i|we)(?:\s|[’']))",
     re.I,
 )
 
@@ -116,10 +116,17 @@ def memory_control(text, state, turn):
         return CONTROL_CLARIFICATION
     index, command = commands[0]
     other_clauses = [clause.strip() for i, clause in enumerate(clauses) if i != index and clause.strip()]
-    # An unresolved retention reference can withdraw the control, even after a shopping clause.
-    if any(RETENTION_DIRECTIVE.match(clause) for clause in other_clauses):
+    companions = [REQUEST_INTRODUCTION.sub("", clause.rstrip(".!?")) for clause in other_clauses]
+    shopping = any(SHOPPING_REQUEST.match(clause) for clause in companions)
+    # A shopping request elsewhere in the turn cannot authorize an ambiguous companion clause.
+    if MEMORY_CONFLICT.search("; ".join(other_clauses)) or any(
+        not (
+            SHOPPING_REQUEST.match(clause) or ACTION.match(clause)
+            or (shopping and SHOPPING_BUDGET.fullmatch(clause))
+        )
+        for clause in companions
+    ):
         return CONTROL_CLARIFICATION
-    rest = "; ".join(other_clauses)
     lower = normalize(command)
     operation = {
         "pause memory": "pause",
@@ -153,9 +160,6 @@ def memory_control(text, state, turn):
     if not operation:
         return "Use “show my preferences” or name the preference, item, and recipient."
 
-    shopping = any(SHOPPING_REQUEST.match(part) for part in action_clauses(rest))
-    if rest and (MEMORY_CONFLICT.search(rest) or (not shopping and not unsupported_action(rest))):
-        return CONTROL_CLARIFICATION
     preferences = state["preferences"]
     groups = resolved_preferences(preferences)
     interrupted = state["brief"] is not None

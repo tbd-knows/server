@@ -83,7 +83,7 @@ CONSTRAINTS = {
     "brand": r"(?:my brand(?: is|:)|i (?:need|want|prefer) (?:the )?brand) (.+)",
     "material": r"(?:my material(?: is|:)|i (?:need|want|prefer)) (cotton|linen|wool|leather|silk|polyester|nylon|denim|suede)",
 }
-CONTEXT_VERSION = 6
+CONTEXT_VERSION = 7
 SCHEMA_VERSION = 1
 
 
@@ -249,7 +249,7 @@ OPTION_REFERENCE_ONLY = re.compile(
     re.I,
 )
 ACTIVE_OPTIONS_PREFIX = re.compile(
-    r"^(?:both|the(?: two)?|these(?: two)?|those(?: two)?) (?:options?|choices?|ones?|listings?)\b",
+    r"^(?:them|it|(?:both|the(?: two)?|these(?: two)?|those(?: two)?) (?:options?|choices?|ones?|listings?))\b",
     re.I,
 )
 COMPARISON_QUALIFIER = re.compile(
@@ -261,15 +261,14 @@ NON_ITEM_START = re.compile(r"^(?:not|by|on|based on|using|for|between|according
 
 
 def shopping_item(details):
+    if ACTIVE_OPTIONS_PREFIX.match(details.lstrip()):
+        return ""
     details = COMPARISON_QUALIFIER.split(details, maxsplit=1)[0].strip()
     details = REPEAT_SUFFIX.sub("", details)
     item = re.split(r"\s+(?:for|with|under|up to|at most|by|on (?:price|fit|condition|size)|in size)\b|,", details, maxsplit=1, flags=re.I)[0].strip()
     item = REPEAT_SUFFIX.sub("", item)
     reference = re.split(r"\s+(?:on|based on|according to)\b", item, maxsplit=1, flags=re.I)[0]
-    if (
-        OPTION_REFERENCE_ONLY.fullmatch(reference) or ACTIVE_OPTIONS_PREFIX.match(reference)
-        or NON_ITEM_START.match(item)
-    ):
+    if OPTION_REFERENCE_ONLY.fullmatch(reference) or NON_ITEM_START.match(item):
         return ""
     return re.sub(r"^(?:both |these |those |some |a pair of |a gift of |a |an )", "", item, flags=re.I)
 

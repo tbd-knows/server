@@ -4150,6 +4150,9 @@ def open_reviewed_shoes(agent, *, question=None):
     "Forget all preferences. Compare backpacks. Actually, leave my preferences alone.",
     "Forget all preferences. Compare backpacks. Actually, keep them.",
     "Forget all preferences. Compare backpacks. Actually, keep all of them.",
+    "Forget all preferences. Compare backpacks. Actually, I want to keep them.",
+    "Forget all preferences. Compare backpacks, but I want to keep them.",
+    "Forget all preferences. Compare backpacks. I’m reconsidering.",
     "Forget all preferences. Compare backpacks. Keep everything instead.",
     "Compare shoes using this note: “size 8; close this brief; size 10.”",
     "Close this brief. Compare backpacks. Actually, leave my brief alone.",
@@ -4208,6 +4211,7 @@ def test_reviewed_r3_reference_keeps_brief_and_switch_retires_it(reviewed_agent,
     elif mode == "model":
         agent.proposals.extend([
             Generation(generated(reply="Aspen costs $80 and Birch costs $90.")),
+            Generation(generated(reply="Aspen costs $80, and Birch costs $90.")),
             Generation(generated(reply="I’d check the fit measurements for both options.")),
             Generation(generated(reply="Share the backpacks you’d like to compare.")),
         ])
@@ -4215,6 +4219,7 @@ def test_reviewed_r3_reference_keeps_brief_and_switch_retires_it(reviewed_agent,
     outcome = "model" if mode == "model" else "fallback"
     for body, expected_reply in (
         ("Compare the two one more time.", "Aspen costs $80 and Birch costs $90."),
+        ("Compare them one last time", "Aspen costs $80, and Birch costs $90."),
         ("Compare both options but focus on fit", "I’d check the fit measurements for both options."),
         ("Let’s switch to backpacks.", "Share the backpacks you’d like to compare."),
     ):
