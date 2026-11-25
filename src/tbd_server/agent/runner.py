@@ -223,7 +223,9 @@ class AgentRunner:
             )
         else:
             action = policy.unsupported_action(text)
-            if control := memory.memory_control(text, state, turn):
+            if harness.withdrawn_task_correction(text):
+                outcome, reply = "control", harness.KEEP_BRIEF + (" " + harness.TRANSACTION if action else "")
+            elif control := memory.memory_control(text, state, turn):
                 outcome, reply = "control", control + (" " + harness.TRANSACTION if action else "")
             elif policy.close_requested(text):
                 reply = harness.CLOSED if state["brief"] is not None else harness.NO_BRIEF
@@ -240,8 +242,8 @@ class AgentRunner:
         text = turn["text"]
         if action:
             outcome, reply, reason = "transaction", harness.TRANSACTION, None
-        elif policy.profile_lookup(text):
-            if policy.PROFILE_EDIT.search(text):
+        elif profile := policy.profile_request(text):
+            if profile == "edit":
                 reply = "Your display name is managed in your TBD account."
             else:
                 name = Store.display_name(cur, user["id"])

@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from tbd_server.agent import harness, memory
+from tbd_server.agent import harness, memory, policy
 
 
 def turn(text):
@@ -482,3 +482,48 @@ def test_paid_gift_replay_misses_render_an_open_recipient_size_question(prematur
     assert reply.startswith("What size does the recipient wear?")
     assert "Maple" not in reply and "Oak" not in reply
     assert saved == active["brief"] and question is None
+
+
+@pytest.mark.parametrize("withdrawal", [
+    ". Actually, keep size 8.",
+    ", actually keep size 8.",
+    " but don't change it.",
+])
+def test_withdrawn_task_correction_has_no_edit_evidence(withdrawal):
+    correction = "Correct size for shoes for me to 10 for this purchase"
+    brief = {"id": "opening", "fields": {"item": {"value": "shoes"}, "size": {"value": "8"}}, "options": []}
+    proposal = generated(brief="update", edits=[{"field": "size", "value": "10"}])
+    inbound = turn(correction + withdrawal)
+    assert harness.current_constraints(inbound["text"], brief) == {}
+    with pytest.raises(harness.BriefEvidenceError, match="withdrawn"):
+        harness.validate(proposal, inbound, brief, None)
+    _, updated, _ = harness.validate(proposal, turn(correction), brief, None)
+    assert updated["fields"]["size"]["value"] == "10"
+    assert brief["fields"]["size"]["value"] == "8"
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Do you remember my name? My TBD account is active.", None),
+    ("What name is on Alex’s TBD account?", None),
+    ("What name is listed on my TBD account?", "read"),
+    ("What's my TBD profile's display name?", "read"),
+    ("Can you tell me what name is on my profile?", "read"),
+    ("How can I change my TBD account display name?", "edit"),
+])
+def test_profile_request_names_explicit_own_profile(text, expected):
+    assert policy.profile_request(text) == expected
+
+
+@pytest.mark.parametrize("reply", ["I’m ChatGPT.", "I am Claude, here to help.", "My name is Avery."])
+def test_conflicting_assistant_identity_is_rejected(reply):
+    inbound = turn("Hi TBD!")
+    with pytest.raises(ValueError, match="Invalid reply"):
+        harness.validate(generated(reply=reply), inbound, None, None)
+    assert harness.validate(generated(reply="I’m TBD, your shopping assistant."), inbound, None, None)[0].startswith(
+        "I’m TBD"
+    )
+
+
+@pytest.mark.parametrize("reply", ["You’re chatting with your TBD shopping assistant.", "I’m happy to help."])
+def test_assistant_can_describe_its_role(reply):
+    assert harness.validate(generated(reply=reply), turn("Hi TBD!"), None, None)[0] == reply

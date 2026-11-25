@@ -27,11 +27,22 @@ DIRECT_CAPABILITIES = re.compile(
     r"(?:what can you (?:do(?: for me)?|help(?: me)? with)|how can you help(?: me)?|how do you work|"
     r"what (?:do you do|are your capabilities)|can you help(?: me)? (?:shop|with shopping))", re.I,
 )
-PROFILE_ASK = re.compile(
-    r"\b(?:account|profile)\b.{0,36}\b(?:display[ -])?name\b"
-    r"|\b(?:display[ -])?name\b.{0,45}\b(?:account|profile)\b", re.I,
+OWN_PROFILE = r"my (?:tbd )?(?:account|profile)"
+PROFILE_NAME = r"(?:display[ -])?name"
+ON_PROFILE = rf"(?:on|in|for) {OWN_PROFILE}"
+PROFILE_NAME_REF = rf"(?:{OWN_PROFILE}(?:[’']s)? {PROFILE_NAME}|(?:my |the )?{PROFILE_NAME} {ON_PROFILE})"
+REQUEST_PREFIX = r"(?:(?:can|could|would) you )?(?:please )?"
+PROFILE_LOOKUP = re.compile(
+    REQUEST_PREFIX
+    + rf"(?:(?:what(?: is|[’']s)|tell me|show me) {PROFILE_NAME_REF}"
+    + rf"|(?:what|(?:tell|show) me what) {PROFILE_NAME} (?:is (?:listed )?{ON_PROFILE}"
+    + rf"|(?:do )?you have {ON_PROFILE}|does {OWN_PROFILE} (?:show|list)))",
+    re.I,
 )
-PROFILE_EDIT = re.compile(r"\b(?:change|edit|update|set|correct|rename)\b", re.I)
+PROFILE_EDIT = re.compile(
+    REQUEST_PREFIX + rf"(?:(?:how (?:can|do) i|can i) )?(?:change|edit|update|set|correct) {PROFILE_NAME_REF}(?: to .+)?",
+    re.I,
+)
 CLOSE_BRIEF = re.compile(
     r"(?:close|clear|finish|cancel|drop)(?: (?:this|the|my))? (?:shopping )?brief"
     r"|(?:i(?:'m|’m| am) done (?:shopping|with (?:this|that)(?: purchase)?)|"
@@ -69,7 +80,18 @@ FALSE_CONFIRMATION = re.compile(
     re.I,
 )
 
-POLICY_VERSION = 7
+OTHER_ASSISTANT = r"(?:chat[ -]?gpt|gpt-[\w.-]+|claude|gemini|grok|copilot|siri|alexa)"
+CONTRADICTORY_IDENTITY = re.compile(
+    r"\b(?:my (?:name|identity) is|i (?:go by|identify as|am (?:called|known as))|"
+    r"i[’']m (?:called|known as))\s+(?!tbd\b)\w"
+    r"|\b(?:i(?: am|[’']m)|you(?: are|[’']re) (?:chatting with|talking to|speaking (?:with|to)))\s+(?!tbd\b)"
+    rf"(?:{OTHER_ASSISTANT}\b|(?:a )?(?:human|real person)\b"
+    r"|(?-i:[A-Z][a-z]+(?: [A-Z][a-z]+){0,3})(?=$|[,.!?]))"
+    rf"|\bthis is {OTHER_ASSISTANT}\b",
+    re.I,
+)
+
+POLICY_VERSION = 8
 
 INSTRUCTIONS = """You are TBD, the Entity's personal shopping assistant in iMessage. Serve the Entity's
 interests. Help shape a buying goal, compare the options they supply, and recommend a choice when
@@ -104,14 +126,25 @@ def without_greeting(text):
     return GREETING.sub("", text.strip(), count=1).strip()
 
 
+def without_quotes(text):
+    return re.sub(r"""“[^”]*”|"[^"]*"|‘[^’]*’|(?<!\w)'[^']*'(?!\w)""", "", text)
+
+
+def request_clauses(text):
+    return (
+        without_greeting(clause).strip(" ,.!?")
+        for clause in re.split(r"[;\n]|[.!?](?:\s+|$)", without_quotes(text))
+    )
+
+
 def direct_reply(text):
-    request = without_greeting(text).rstrip(".!?").strip()
-    if DIRECT_IDENTITY.fullmatch(request):
-        return IDENTITY
-    if DIRECT_CAPABILITIES.fullmatch(request):
-        return CAPABILITIES
-    if re.fullmatch(r"(?:(?:please|can you|could you) )?(?:switch|change|use|pick|select)\b.{0,60}\bmodel\b.*", request, re.I):
-        return "TBD selects the model used in this chat. Tell me what you’d like help with."
+    for request in request_clauses(text):
+        if DIRECT_IDENTITY.fullmatch(request):
+            return IDENTITY
+        if DIRECT_CAPABILITIES.fullmatch(request):
+            return CAPABILITIES
+        if re.fullmatch(REQUEST_PREFIX + r"(?:switch|change|use|pick|select)\b.{0,60}\bmodel\b.*", request, re.I):
+            return "TBD selects the model used in this chat. Tell me what you’d like help with."
     return None
 
 
@@ -119,12 +152,13 @@ def bare_link(text):
     return re.fullmatch(r"https?://[^\s]+", without_greeting(text), re.I) is not None
 
 
-def profile_lookup(text):
-    request = without_greeting(text)
-    return bool(PROFILE_ASK.search(request) and (
-        PROFILE_EDIT.search(request)
-        or re.match(r"^(?:what|which|where|how|show|tell|can|could|would|do|is)\b", request, re.I)
-    ))
+def profile_request(text):
+    for request in request_clauses(text):
+        if PROFILE_LOOKUP.fullmatch(request):
+            return "read"
+        if PROFILE_EDIT.fullmatch(request):
+            return "edit"
+    return None
 
 
 def unsupported_action(text):

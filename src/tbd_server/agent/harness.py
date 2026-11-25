@@ -14,8 +14,8 @@ from tbd_server.user.store import Problem
 
 from .memory import TASK_CORRECTION, TASK_ONLY, is_memory_input, normalize, recipient_scope, resolved_preferences
 from .policy import (
-    ACTION, FALSE_CONFIRMATION, INSTRUCTIONS, SECRET, SHOPPING_REQUEST, action_clauses, profile_lookup,
-    unsupported_action, without_greeting,
+    ACTION, CONTRADICTORY_IDENTITY, FALSE_CONFIRMATION, INSTRUCTIONS, SECRET, SHOPPING_REQUEST,
+    action_clauses, profile_request, unsupported_action, without_greeting, without_quotes,
 )
 
 SKEW = timedelta(seconds=2)
@@ -24,6 +24,7 @@ PROMPT_BYTES = 16000
 FALLBACK = "I couldn’t help with that right now. Please try again."
 RESTATEMENT = "Please restate what you're shopping for, who it’s for, and the key details in a short message."
 CLARIFY_BRIEF = "Please confirm which shopping detail you want me to use and give its value."
+KEEP_BRIEF = "I’ll leave the shopping details as they are."
 TRANSACTION = (
     "I can’t find live listings, contact sellers, buy, pay, or verify order or payment status. "
     "Share the options you’re considering and I can help you compare."
@@ -33,6 +34,10 @@ NO_BRIEF = "There’s no open shopping brief. Tell me what you’d like to look 
 LINK_DETAILS = "Please paste the item details, price, and anything you want me to compare. I can work from what you share here."
 BRIEF_DETAILS = "What are you shopping for, who is it for, and what detail should I use?"
 SENSITIVE = "Please don’t share payment credentials or authentication secrets in this chat."
+OPTION_REFERENCE = (
+    r"(?:(?:both|the two|these two|those two|these|those|the other)(?: (?:options?|choices?|ones?|listings?))?"
+    r"|(?:the |two |these |those )?(?:options|choices|listings)|them|it|this|that)"
+)
 RECIPIENT = re.compile(
     r"\b(?i:for) ((?i:me|myself|someone(?: else)?|(?:my|a|an|our|the) [\w-]+(?: [\w-]+)*?)"
     r"|[A-Z][\w-]*(?: [A-Z][\w-]*)*)(?=$|[,:.!?]|\s+(?i:with|under|by|and|in size)\b)"
@@ -76,7 +81,7 @@ CONSTRAINTS = {
     "brand": r"(?:my brand(?: is|:)|i (?:need|want|prefer) (?:the )?brand) (.+)",
     "material": r"(?:my material(?: is|:)|i (?:need|want|prefer)) (cotton|linen|wool|leather|silk|polyester|nylon|denim|suede)",
 }
-CONTEXT_VERSION = 1
+CONTEXT_VERSION = 2
 SCHEMA_VERSION = 1
 
 
@@ -149,11 +154,10 @@ def typed_answer(text, question, brief):
 
 
 def message_clauses(text):
-    unquoted = re.sub(r"""“[^”]*”|"[^"]*"|‘[^’]*’|(?<!\w)'[^']*'(?!\w)""", "", text)
     clauses = re.split(
         r"[;\n]|[.!?](?:\s+|$)|,?\s+(?:and|but)\s+(?=(?:i|my|(?:the )?(?:seller|listing|option)|(?:also )?(?:buy|contact|pay|order|text|message|email|check|verify))\b)"
         r"|,\s+(?=(?:i|my|(?:the )?(?:seller|listing|option)|(?:also )?(?:buy|contact|pay|order|text|message|email|check|verify))\b)",
-        unquoted,
+        without_quotes(text),
         flags=re.I,
     )
     return [clause.strip().strip(",").strip() for clause in clauses]
@@ -170,8 +174,37 @@ def current_constraints(text, brief=None):
     return request_constraints(text, brief)[0]
 
 
+WITHDRAWAL = re.compile(
+    r"(?:^|[,;]|\bbut\b|\band\b)\s*(?:(?:actually|instead)\b[, ]*)?"
+    r"(?:keep\b|never ?mind\b|take (?:that|it) back\b|(?:do not|don[’']t) (?:change|correct|update)\b|"
+    r"leave\b.{0,36}\b(?:alone|as (?:it is|is))\b)", re.I,
+)
+
+
+def task_correction(clause):
+    if TASK_ONLY.search(clause):
+        return TASK_CORRECTION.fullmatch(TASK_ONLY.sub("", clause))
+    return None
+
+
+def withdrawn_task_correction(text):
+    # Recognize a withdrawal after a complete task-only instruction, including in the same sentence.
+    if not re.search(r"\bcorrect\b", text, re.I):
+        return False
+    instruction_seen = False
+    for clause in message_clauses(text):
+        clause = without_greeting(clause)
+        for withdrawal in WITHDRAWAL.finditer(clause):
+            if instruction_seen or task_correction(clause[:withdrawal.start()].rstrip(" ,")):
+                return True
+        instruction_seen = instruction_seen or task_correction(clause) is not None
+    return False
+
+
 def request_constraints(text, brief=None):
     """Read explicit constraints and retain conflicts in the request's scope."""
+    if withdrawn_task_correction(text):
+        return {}, ()
     values = {}
     recipient_sizes = {}
     multiple_recipients = any(
@@ -180,7 +213,7 @@ def request_constraints(text, brief=None):
     )
     for clause in message_clauses(text):
         clause = without_greeting(clause)
-        if TASK_ONLY.search(clause) and (correction := TASK_CORRECTION.fullmatch(TASK_ONLY.sub("", clause))):
+        if correction := task_correction(clause):
             key, item, person, value = correction.groups()
             for field, entry in (("item", item), ("recipient", person), (key.casefold(), value)):
                 identity = recipient_scope(entry) if field == "recipient" else normalize(entry)
@@ -211,7 +244,9 @@ def request_constraints(text, brief=None):
             item = re.split(r"\s+(?:for|with|under|up to|at most|by|in size)\b|,", details, maxsplit=1, flags=re.I)[
                 0
             ].strip()
-            item = re.sub(r"^(?:these |some |a pair of |a gift of |a |an )", "", item, flags=re.I)
+            if re.fullmatch(OPTION_REFERENCE, item, re.I):
+                continue
+            item = re.sub(r"^(?:both |these |those |some |a pair of |a gift of |a |an )", "", item, flags=re.I)
             if re.fullmatch(r"[A-Z][\w-]+(?: (?:and|or) [A-Z][\w-]+)+", item):
                 # Comparisons between supplied labels carry no item evidence.
                 continue
@@ -357,7 +392,7 @@ def brief_in_use(cur, turn, state):
     eligible = {
         row["id"]: row for row in rows
         if after_reset(row, state) and not SECRET.search(row["text"])
-        and not profile_lookup(row["text"]) and not is_memory_input(row["text"])
+        and not profile_request(row["text"]) and not is_memory_input(row["text"])
     }
     if eligible.keys() != sources:
         return None
@@ -409,7 +444,7 @@ def eligible_parent(parent, turn, state):
         and state["enrolled_at"] <= parent["source_at"] <= turn["source_at"]
         and parent["source_at"] <= parent["created_at"] + SKEW
         and not SECRET.search(parent["text"])
-        and not profile_lookup(parent["text"])
+        and not profile_request(parent["text"])
         and not is_memory_input(parent["text"])
         and not unsupported_action(parent["text"])
     )
@@ -444,7 +479,7 @@ ISOLATED = re.compile(
     + RECIPIENT_ANSWER + r")", re.I,
 )
 VAGUE_TASK = re.compile(
-    r"^(?:(?:(?:can|could|would) you )?(?:compare|pick|choose) (?:them|these|those|the options)(?: |$)|"
+    r"^(?:(?:(?:can|could|would) you )?(?:please )?(?:compare|pick|choose) " + OPTION_REFERENCE + r"\b|"
     r"which (?:option|one|fits|works|is better|of (?:the|these|those))|"
     r"(?:continue|resume|pick up|back to) (?:where|my|the|that|this)|what about (?:that|those|the other))", re.I,
 )
@@ -576,7 +611,7 @@ def context(cur, turn, state):
             reply = parent["reply"]
             visible_reply = (
                 parent["outcome"] == "model" and reply and visible(parent, turn)
-                and not SECRET.search(reply) and not FALSE_CONFIRMATION.search(reply)
+                and not SECRET.search(reply) and not FALSE_CONFIRMATION.search(reply) and not CONTRADICTORY_IDENTITY.search(reply)
             )
             recent.append({"source": str(parent["id"]), "user": parent["text"], "reply": reply if visible_reply else None})
     reply_size = gift_size_for_reply(text, scope.constraints)
@@ -634,8 +669,11 @@ def is_supplied_option(value, text):
     )
 
 
-OPTION_PRICE = re.compile(
-    r"\b([A-Z][\w-]*(?: [A-Z0-9][\w-]*){0,3})\s+(?i:costs?|is|runs?|asks?|for|at)\s+" + PRICE
+OPTION_LABEL = r"\b([A-Z][\w-]*(?: [A-Z0-9][\w-]*){0,3})"
+PRICE_CLAIM = r"\s+(?i:costs?|is|runs?|asks?|for|at)\s+" + PRICE
+SIZE_CLAIM = (
+    r"(?i:(?:\s+(?:(?:is(?: available in)?|comes? in|available in|in|at)\s+(?:a )?)?|\s*[:(–—]\s*)size\s+"
+    r"|[’']s\s+(?:shoe )?size(?: is|:)\s*)" + SIZE + r"\b"
 )
 
 
@@ -648,23 +686,30 @@ def size_token(value):
     return normalize(value).removeprefix("size ").replace(" ", "")
 
 
+def option_numbers_match(reply, sources, claim, canonical):
+    pattern = re.compile(OPTION_LABEL + claim)
+    by_option = {}
+    for source in sources:
+        for label, value in pattern.findall(source):
+            name = normalize(label).removeprefix("the ")
+            by_option.setdefault(name, set()).add(canonical(value))
+    for name, values in by_option.items():
+        named_claim = r"\b" + re.escape(name) + claim
+        if any(canonical(match) not in values for match in re.findall(named_claim, reply, re.I)):
+            return False
+    return True
+
+
 def grounded_numbers(reply, prompt):
     """Reject invented prices and sizes against authorized User evidence."""
     context = json.loads(prompt)
     sources = [context["current"], *(parent["user"] for parent in context["recent"])]
     if brief := context["brief"]:
         sources.extend(entry["value"] for entry in brief["options"])
-    prices_by_option = {}
-    for source in sources:
-        for label, price in OPTION_PRICE.findall(source):
-            prices_by_option.setdefault(normalize(label), set()).add(amount(price))
-    if any(
-        normalize(label) in prices_by_option and amount(price) not in prices_by_option[normalize(label)]
-        for label, price in OPTION_PRICE.findall(reply)
-    ):
-        return False
-    for key, pattern in (("budget", PRICE), ("size", SIZE_MENTION)):
+    for key, pattern, named_claim in (("budget", PRICE, PRICE_CLAIM), ("size", SIZE_MENTION, SIZE_CLAIM)):
         format_value = amount if key == "budget" else size_token
+        if not option_numbers_match(reply, sources, named_claim, format_value):
+            return False
         values = {
             format_value(value)
             for source in sources for value in re.findall(pattern, source)
@@ -686,6 +731,8 @@ def grounded_numbers(reply, prompt):
 def validate(raw, turn, brief, answer, *, require_gift_size=False, prompt=None):
     result = Result.model_validate_json(raw)
     text = turn["text"]
+    if withdrawn_task_correction(text):
+        raise BriefEvidenceError("The correction was withdrawn")
     constraints, conflicts = request_constraints(text, brief)
     if conflicts:
         raise BriefEvidenceError("Conflicting request scope")
@@ -699,6 +746,7 @@ def validate(raw, turn, brief, answer, *, require_gift_size=False, prompt=None):
         or reply.count("?") > 1
         or SECRET.search(reply)
         or FALSE_CONFIRMATION.search(reply)
+        or CONTRADICTORY_IDENTITY.search(reply)
         or re.search(r"\b(?:send|share|provide|enter|tell me)\b.{0,60}\b(?:card|password|cvv|pin|code)\b", reply, re.I)
     ):
         raise ValueError("Invalid reply")
@@ -706,7 +754,7 @@ def validate(raw, turn, brief, answer, *, require_gift_size=False, prompt=None):
     if social_text(text) and not scope and (result.brief != "unchanged" or result.question):
         raise BriefValidationError("A social turn cannot edit the brief or attach a question")
     if prompt is not None and not require_gift_size and not grounded_numbers(reply, prompt):
-        raise ValueError("A material number was not supplied")
+        raise ValueError("A price or size conflicts with supplied evidence")
     if len(result.edits) > 12:
         raise BriefValidationError("Too many edits")
     if result.brief in ("unchanged", "close") and result.edits:
