@@ -2,7 +2,10 @@
 
 import re
 
-from .policy import SECRET, SHOPPING_REQUEST, action_clauses, unsupported_action, without_greeting
+from .policy import (
+    QUOTED_PLACEHOLDER, RETRACTION, SECRET, SHOPPING_REQUEST, action_clauses, quoted_text, unsupported_action, without_greeting,
+    without_quotes,
+)
 
 KEYS = ("size", "fit", "condition", "brand", "material")
 
@@ -19,8 +22,9 @@ TASK_CORRECTION = re.compile(
 )
 
 MEMORY_CONFLICT = re.compile(
-    r"\b(?:never mind|nevermind|take (?:that|it) back|changed my mind|"
-    r"(?:keep|retain|restore|undo|forget|save|remember|resume|pause)\b.{0,40}\b(?:preference|memory|that|it)|"
+    RETRACTION + r"|\b(?:"
+    r"leave\b.{0,40}\b(?:preferences?|memory|that|it|them)\b.{0,24}\b(?:alone|as (?:(?:it )?is|they are)|unchanged)\b|"
+    r"(?:keep|retain|restore|undo|forget|save|remember|resume|pause)\b.{0,40}\b(?:preferences?|memory|that|it)|"
     r"(?:do not|don[’']t) (?:forget|delete|clear|pause)|(?:pause|resume) memory)\b",
     re.I,
 )
@@ -34,7 +38,7 @@ CONTROL_SPLIT = re.compile(
     r";|\n|[.!?]\s+|,?\s+(?:and|then)\s+(?=(?:(?:please|can you)\s+)?"
     r"(?:compare|find|look|help|show|recommend|buy|order|pay|contact|text|message|check|verify|remember|"
     r"save|correct|repair|forget|pause|resume|close)\b)"
-    r"|(?:,\s*|\s+(?:and|but)\s+)(?=(?:actually|keep|retain|undo|never mind|resume|don[’']t)\b)",
+    r"|(?:,\s*|\s+(?:and|but)\s+)(?=(?:actually|keep|leave|retain|undo|never mind|resume|don[’']t)\b)",
     re.I,
 )
 
@@ -68,14 +72,10 @@ def reset_context(state, turn):
 
 def memory_command(clause):
     text = re.sub(r"^(?:please |(?:can|could|would) you (?:please )?)", "", clause.strip(), count=1, flags=re.I)
-    if TASK_ONLY.search(text.rstrip(".!?")):
+    if text.casefold().rstrip(".!?") == "correct" or TASK_ONLY.search(text.rstrip(".!?")):
         return None
     if CONTROL_HEAD.match(text):
-        return text.rstrip(".!?").strip()
-    if re.search(r"[“\"‘]|(?<!\w)'", text) and CONTROL_HEAD.match(
-        re.split(r"[“\"‘]|(?<!\w)'", text, maxsplit=1)[1]
-    ):
-        return ""
+        return "" if QUOTED_PLACEHOLDER in text else text.rstrip(".!?").strip()
     if re.match(r"^(?:do not|don[’']t|never mind)\s+", text, re.I) and CONTROL_HEAD.match(
         re.sub(r"^(?:do not|don[’']t|never mind)[, ]+", "", text, flags=re.I)
     ):
@@ -83,12 +83,25 @@ def memory_command(clause):
     return None
 
 
+def memory_clauses(text):
+    return CONTROL_SPLIT.split(without_greeting(without_quotes(text, f" {QUOTED_PLACEHOLDER} ")))
+
+
+def quoted_control(text):
+    return any(
+        memory_command(clause) is not None
+        for quote in quoted_text(text) for clause in CONTROL_SPLIT.split(quote)
+    )
+
+
 def is_memory_input(text):
-    return any(memory_command(clause) is not None for clause in CONTROL_SPLIT.split(without_greeting(text)))
+    return quoted_control(text) or any(memory_command(clause) is not None for clause in memory_clauses(text))
 
 
 def memory_control(text, state, turn):
-    clauses = CONTROL_SPLIT.split(without_greeting(text))
+    if quoted_control(text):
+        return CONTROL_CLARIFICATION
+    clauses = memory_clauses(text)
     commands = [(i, command) for i, clause in enumerate(clauses) if (command := memory_command(clause)) is not None]
     if not commands:
         return None

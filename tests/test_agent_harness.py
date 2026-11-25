@@ -280,7 +280,7 @@ def test_thin_adapter_stateless_request_and_usage(monkeypatch, status, output_st
         ("budget", "My budget is $65 and the seller asks $80.", "$65", "$80", "the seller asks $80"),
         ("budget", "My budget is $65, but the seller asks $80.", "$65", "$80", "the seller asks $80"),
         ("size", "Listing A is size 8 but I need size 10.", "10", "8", "Listing A is size 8"),
-        ("size", "The listing says “I need size 8”. My size is 10.", "10", "8", "I need size 8"),
+        ("size", "The listing says “Size 8”. My size is 10.", "10", "8", "Size 8"),
         ("condition", "Seller describes it as new. I prefer used.", "used", "new", "Seller describes it as new"),
     ],
 )
@@ -547,7 +547,7 @@ def test_size_after_listed_price_is_bound_to_its_option():
     inbound = turn("Compare shoes. Aspen costs $80, size 8. Birch costs $105, size 10.")
     active = state(inbound)
     prompt = harness.context(scope_cursor(active), inbound, active).prompt
-    with pytest.raises(ValueError, match="price or size conflicts"):
+    with pytest.raises(ValueError, match="listing claim conflicts"):
         harness.validate(generated(reply="Aspen comes in size 10."), inbound, None, None, prompt=prompt)
     reply, _, _ = harness.validate(generated(reply="Aspen comes in size 8."), inbound, None, None, prompt=prompt)
     assert reply == "Aspen comes in size 8."

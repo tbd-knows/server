@@ -4089,3 +4089,273 @@ def test_agentification_option_references_keep_eligible_brief_on_fallback(agent_
     _, reply = settle("Compare the two", "fallback")
     assert reply == harness.BRIEF_DETAILS
     assert len(calls) == 3
+
+
+@pytest.fixture
+def reviewed_agent(agent_pilot):
+    import json
+    from collections import deque
+    from types import SimpleNamespace
+
+    from tbd_server.agent.adapter import Generation
+    from tbd_server.agent.store import current_state
+
+    store, account, users, pairs, runner, event, intake, result = agent_pilot
+    calls, proposals = [], deque()
+
+    async def adapter(request, _timeout):
+        calls.append(json.loads(request.context))
+        return proposals.popleft() if proposals else Generation(reason="synthetic_unavailable")
+
+    def settle(text, outcome):
+        inbound = intake(event(text))
+        assert runner.step()
+        turn, replies = result(inbound)
+        assert turn["outcome"] == outcome
+        assert len(replies) == 1 and replies[0]["dedupe_key"] == "reply:" + str(inbound["id"])
+        return inbound, turn, replies[0]["text"]
+
+    def state():
+        with store.transaction() as cur:
+            return current_state(cur, users[0]["id"])
+
+    def observe(inbound):
+        return observe_agent_reply_sent(store, account, pairs, inbound, result)
+
+    runner.adapter = adapter
+    return SimpleNamespace(
+        runner=runner, calls=calls, proposals=proposals, settle=settle, state=state,
+        observe=observe, store=store, user_id=users[0]["id"],
+    )
+
+
+def open_reviewed_shoes(agent, *, question=None):
+    from tbd_server.agent.adapter import Generation
+    from test_agent_harness import generated
+
+    agent.proposals.append(Generation(generated(
+        brief="update",
+        edits=[
+            {"field": "item", "value": "shoes"},
+            {"field": "option", "value": "Aspen costs $80"},
+            {"field": "option", "value": "Birch costs $90"},
+        ],
+        question=question,
+    )))
+    return agent.settle("Compare shoes. Aspen costs $80. Birch costs $90.", "model")
+
+
+@pytest.mark.parametrize("body", [
+    "Compare shoes using this note: “size 8; forget all preferences; size 10.”",
+    "Forget all preferences. Compare backpacks. Actually, leave my preferences alone.",
+    "Compare shoes using this note: “size 8; close this brief; size 10.”",
+    "Close this brief. Compare backpacks. Actually, leave my brief alone.",
+    "Pause memory. Compare backpacks. Actually, leave my memory alone.",
+    "Compare shoes using this note: \"size 8; pause memory; size 10.",
+])
+def test_reviewed_r1_quoted_and_withdrawn_controls_preserve_state(reviewed_agent, body):
+    from tbd_server.agent import harness, memory
+
+    agent = reviewed_agent
+    agent.settle("Forget all preferences", "control")
+    agent.settle("Save size for shoes for me is 8", "control")
+    open_reviewed_shoes(agent)
+    before = agent.state()
+    calls = len(agent.calls)
+    _, turn, reply = agent.settle(body, "control")
+    assert reply in (memory.CONTROL_CLARIFICATION, harness.KEEP_BRIEF)
+    assert len(agent.calls) == calls and turn["granted_at"] is None
+    after = agent.state()
+    for field in ("preferences", "paused", "brief", "reset_sequence", "reset_source_at"):
+        assert after[field] == before[field]
+
+
+@pytest.mark.parametrize("adapter_available", [True, False])
+def test_reviewed_r3_reference_keeps_brief_and_switch_retires_it(reviewed_agent, adapter_available):
+    from tbd_server.agent import harness
+
+    agent = reviewed_agent
+    open_reviewed_shoes(agent)
+    before = agent.state()["brief"]
+    if not adapter_available:
+        agent.runner.adapter = None
+
+    _, turn, reply = agent.settle("Compare the two again.", "fallback")
+    assert reply == harness.FALLBACK and agent.state()["brief"] == before
+    if adapter_available:
+        assert agent.calls[-1]["brief"]["id"] == before["id"]
+        assert agent.calls[-1]["brief"]["options"] == before["options"]
+        assert agent.calls[-1]["current_constraints"] == {}
+    else:
+        assert turn["granted_at"] is None and len(agent.calls) == 1
+
+    _, turn, reply = agent.settle("Let’s switch to backpacks.", "fallback")
+    assert reply == harness.FALLBACK and turn["question"] is None and agent.state()["brief"] is None
+    if adapter_available:
+        assert agent.calls[-1]["brief"] is None and agent.calls[-1]["recent"] == []
+        assert agent.calls[-1]["current_constraints"] == {"item": "backpacks"}
+    else:
+        assert turn["granted_at"] is None and len(agent.calls) == 1
+
+
+def test_reviewed_r4_listing_provenance_excludes_obsolete_shopper_size(reviewed_agent):
+    import json
+
+    from psycopg.types.json import Jsonb
+
+    from tbd_server.agent import harness
+    from tbd_server.agent.adapter import Generation
+    from test_agent_harness import generated
+
+    agent = reviewed_agent
+    fixture = "Compare shoes. I need size 8. Aspen costs $80."
+    size = {"field": "size", "value": "8"}
+    item = {"field": "item", "value": "shoes"}
+    agent.proposals.append(Generation(generated(
+        brief="update", edits=[item, size, {"field": "option", "value": "size 8"}],
+    )))
+    _, _, reply = agent.settle(fixture, "fallback")
+    assert agent.calls[-1]["current"] == fixture
+    assert reply == harness.CLARIFY_BRIEF and agent.state()["brief"] is None
+
+    options = ("Aspen costs $80", "Birch is size 11")
+    agent.proposals.append(Generation(generated(
+        brief="update", edits=[item, size, *({"field": "option", "value": value} for value in options)],
+    )))
+    opening, _, _ = agent.settle(fixture + " Birch is size 11.", "model")
+    brief = agent.state()["brief"]
+    brief["options"].append({"value": "size 8", "source": str(opening["id"])})
+    with agent.store.transaction() as cur:
+        cur.execute("UPDATE agent_service.user_state SET brief=%s WHERE user_id=%s", (Jsonb(brief), agent.user_id))
+
+    agent.proposals.append(Generation(generated(
+        reply="I’ll use size 10 for this comparison.", brief="update", edits=[{"field": "size", "value": "10"}],
+    )))
+    corrected, _, reply = agent.settle("Correct size for shoes for me to 10 for this purchase.", "model")
+    assert "use size 10" in reply
+    prompt = agent.calls[-1]
+    assert "size 8" not in json.dumps(prompt)
+    assert [entry["value"] for entry in prompt["brief"]["options"]] == list(options)
+    saved = agent.state()["brief"]
+    assert saved["fields"]["size"] == {"value": "10", "source": str(corrected["id"])}
+    assert [entry["value"] for entry in saved["options"]] == list(options)
+
+    agent.proposals.append(Generation(generated(reply="Birch comes in size 11.")))
+    _, _, reply = agent.settle("Compare the two again.", "model")
+    assert reply == "Birch comes in size 11."
+    assert "size 8" not in json.dumps(agent.calls[-1])
+    assert [entry["value"] for entry in agent.calls[-1]["brief"]["options"]] == list(options)
+
+
+@pytest.mark.parametrize("body,correct,swapped", [
+    (
+        "Aspen: $80, size 8. Birch: $105, size 10.",
+        "Aspen costs $80 and comes in size 8.",
+        ("Aspen costs $105 and comes in size 10.", "Aspen costs $105 and comes in size 8.",
+         "Aspen costs $80 and comes in size 10.", "Cedar costs $80."),
+    ),
+    ("Aspen is used. Birch is new.", "Aspen is used. Birch is new.", ("Aspen is new.", "Birch is used.")),
+])
+def test_reviewed_r5_named_listing_claims(reviewed_agent, body, correct, swapped):
+    from tbd_server.agent import harness
+    from tbd_server.agent.adapter import Generation
+    from test_agent_harness import generated
+
+    agent = reviewed_agent
+    for proposal in (*swapped, correct):
+        accepted = proposal == correct
+        agent.proposals.append(Generation(generated(reply=proposal)))
+        _, turn, reply = agent.settle(body, "model" if accepted else "fallback")
+        assert agent.calls[-1]["current"] == body and turn["granted_at"] is not None
+        assert reply == (proposal if accepted else harness.FALLBACK)
+        assert agent.state()["brief"] is None
+
+
+def test_reviewed_r6_polite_local_requests_and_false_live_claim(reviewed_agent):
+    from tbd_server.agent import harness, policy
+    from tbd_server.agent.adapter import Generation
+    from test_agent_harness import generated
+
+    agent = reviewed_agent
+    adapter = agent.runner.adapter
+    agent.runner.adapter = None
+    for body, outcome, expected in (
+        ("Can you tell me your name?", "control", policy.IDENTITY),
+        ("Could you tell me what you can do?", "control", policy.CAPABILITIES),
+        ("Please search the web for running shoes and compare Aspen.", "transaction", harness.TRANSACTION),
+    ):
+        _, turn, reply = agent.settle(body, outcome)
+        assert reply == expected and turn["granted_at"] is None and agent.calls == []
+        assert agent.state()["brief"] is None
+
+    agent.runner.adapter = adapter
+    for claim in ("I spoke with the seller and they confirmed Aspen is in stock.",
+                  "I checked Aspen’s availability online.", "I texted the seller."):
+        agent.proposals.append(Generation(generated(reply=claim)))
+        _, turn, reply = agent.settle("Compare shoes. Aspen costs $80.", "fallback")
+        assert turn["granted_at"] is not None and reply == harness.FALLBACK
+        assert agent.calls[-1]["current"] == "Compare shoes. Aspen costs $80."
+        assert agent.state()["brief"] is None
+
+
+@pytest.mark.parametrize("observed", [False, True])
+def test_reviewed_r7_short_size_requires_eligible_observed_question(reviewed_agent, observed):
+    from time import sleep
+
+    from tbd_server.agent import harness
+    from tbd_server.agent.adapter import Generation
+    from test_agent_harness import generated
+
+    agent = reviewed_agent
+    opening, question, reply = open_reviewed_shoes(agent, question={"field": "size", "value": None})
+    before = agent.state()["brief"]
+    assert question["question"]["brief_id"] == before["id"] and reply.endswith("What size should I use?")
+    if observed:
+        sent = agent.observe(opening)
+        sleep(harness.SKEW.total_seconds())
+
+    agent.proposals.append(Generation(generated(
+        reply="Got it, 8 wide.", brief="update", edits=[{"field": "size", "value": "8 wide"}],
+    )))
+    answer, turn, reply = agent.settle("8 wide", "model" if observed else "fallback")
+    if observed:
+        assert harness.visible(sent, answer)
+        assert agent.calls[-1]["typed_answer"] == {"size": "8 wide"} and reply == "Got it, 8 wide."
+        assert agent.state()["brief"]["fields"]["size"] == {"value": "8 wide", "source": str(answer["id"])}
+    else:
+        assert len(agent.calls) == 1 and turn["granted_at"] is None
+        assert reply == harness.RESTATEMENT and agent.state()["brief"] == before
+
+
+def test_reviewed_r8_local_identity_preserves_introduction_until_forget(reviewed_agent):
+    import json
+    from time import sleep
+
+    from tbd_server.agent import harness, policy
+    from tbd_server.agent.adapter import Generation
+    from test_agent_harness import generated
+
+    agent = reviewed_agent
+    intro, turn, reply = agent.settle("My name is Juniper. What’s your name?", "control")
+    assert reply == policy.IDENTITY and turn["granted_at"] is None and agent.calls == []
+    sent = agent.observe(intro)
+    sleep(harness.SKEW.total_seconds())
+    agent.proposals.append(Generation(generated(reply="You told me your name is Juniper.")))
+    recall, _, reply = agent.settle("Do you remember my name?", "model")
+    assert harness.visible(sent, recall) and reply == "You told me your name is Juniper."
+    assert agent.calls[-1]["recent"] == [
+        {"source": str(intro["id"]), "user": "My name is Juniper", "reply": policy.IDENTITY},
+    ]
+    assert agent.state()["brief"] is None and agent.state()["preferences"] == {}
+
+    forgotten, turn, reply = agent.settle("Forget my name", "control")
+    assert "cleared" in reply and turn["granted_at"] is None
+    assert agent.state()["reset_sequence"] == forgotten["queue_sequence"]
+    assert agent.state()["reset_source_at"] == forgotten["source_at"]
+    _, turn, profile = agent.settle("What name is on my TBD account?", "control")
+    assert turn["granted_at"] is None and "User Service" in profile
+    agent.proposals.append(Generation(generated(reply="I don’t have a name for you in this chat.")))
+    _, _, reply = agent.settle("Do you remember my name?", "model")
+    assert reply == "I don’t have a name for you in this chat."
+    assert agent.calls[-1]["recent"] == [] and "Juniper" not in json.dumps(agent.calls[-1])
+    assert profile not in json.dumps(agent.calls[-1])

@@ -218,16 +218,17 @@ class AgentRunner:
             reason = "operator_fallback"
             outcome, reply = (
                 ("control", "Preference controls are temporarily unavailable.")
-                if memory.is_memory_input(text)
+                if memory.is_memory_input(text) or policy.close_intent(text)
                 else ("fallback", harness.FALLBACK)
             )
         else:
             action = policy.unsupported_action(text)
-            if harness.withdrawn_task_correction(text):
+            close = policy.close_intent(text)
+            if close == "clarify" or harness.withdrawn_task_correction(text):
                 outcome, reply = "control", harness.KEEP_BRIEF + (" " + harness.TRANSACTION if action else "")
             elif control := memory.memory_control(text, state, turn):
                 outcome, reply = "control", control + (" " + harness.TRANSACTION if action else "")
-            elif policy.close_requested(text):
+            elif close == "close":
                 reply = harness.CLOSED if state["brief"] is not None else harness.NO_BRIEF
                 state["brief"] = None
                 outcome, reply = "control", reply + (" " + harness.TRANSACTION if action else "")
@@ -268,7 +269,7 @@ class AgentRunner:
             active = harness.brief_in_use(cur, turn, state)
             prior = (
                 harness.previous_turns(cur, turn)
-                if active and harness.ISOLATED.fullmatch(text.strip().rstrip(".!?")) else ()
+                if active and harness.short_answer(text) else ()
             )
             scope = harness.resolve_scope(turn, state, active, prior)
             if scope.retire:

@@ -21,11 +21,11 @@ SECRET = re.compile(
 GREETING = re.compile(r"^(?:hey|hi|hello|hiya|good (?:morning|afternoon|evening))\b(?:[ ,]+tbd\b)?[ ,.!?–—]*", re.I)
 DIRECT_IDENTITY = re.compile(
     r"(?:who are you(?: exactly)?|who am i (?:talking|speaking) to|what are you|what(?: is|'s|’s) your name|are you (?:tbd|(?:an? )?(?:ai|bot|human|real person))|"
-    r"what is tbd|introduce yourself|tell me (?:who you are|about yourself))", re.I,
+    r"what is tbd|introduce yourself|tell me (?:your name|who you are|about yourself))", re.I,
 )
 DIRECT_CAPABILITIES = re.compile(
     r"(?:what can you (?:do(?: for me)?|help(?: me)? with)|how can you help(?: me)?|how do you work|"
-    r"what (?:do you do|are your capabilities)|can you help(?: me)? (?:shop|with shopping))", re.I,
+    r"tell me what you can do|what (?:do you do|are your capabilities)|can you help(?: me)? (?:shop|with shopping))", re.I,
 )
 OWN_PROFILE = r"my (?:tbd )?(?:account|profile)"
 PROFILE_NAME = r"(?:display[ -])?name"
@@ -56,26 +56,31 @@ ACTION = re.compile(
     r".{0,32}(?:status|go through|shipped|arrived|delivered|\?)?"
     r"|(?:contact|message|text|call|email|reach out to|negotiate with|ask)\b.{0,36}\b(?:seller|merchant|vendor|shop)\b"
     r"|(?:see|check|find out) (?:if|whether)\b.{0,60}\b(?:in stock|available|still for sale)\b"
-    r"|(?:source|browse)\s+.+|(?:find|search(?: for)?|look up|pull up|show(?: me)?)\b.{0,65}\b"
+    r"|(?:source|browse)\s+.+|search (?:the )?(?:web|internet)\b|(?:find|search(?: for)?|look up|pull up|show(?: me)?)\b.{0,65}\b"
     r"(?:listings?|deals?|in stock|for sale|offers?|online|on (?:ebay|amazon|facebook marketplace))\b)",
     re.I,
 )
 
 SHOPPING_REQUEST = re.compile(
     r"^(?:(?:can|could|would) you\s+)?(?:please\s+)?(?:compare|find|show|recommend|help me (?:find|compare|choose|pick|shop for)|"
-    r"i (?:need|want)|i[’']m (?:also )?(?:looking for|shopping for|trying to find)|looking for|shopping for|switch to)\s+",
+    r"let[’']s switch to|i (?:need|want)|i[’']m (?:also )?(?:looking for|shopping for|trying to find)|looking for|shopping for|switch to)\s+",
     re.I,
 )
 
 FALSE_CONFIRMATION = re.compile(
     r"\b(?:I|we|TBD)(?: (?:(?:have|has|had|already|just|successfully|will|can) )*|[’'](?:ve|ll) (?:just )?)"
     r"(?:saved|forgot|deleted|ordered|purchased|bought|paid|verified|confirmed|contacted|messaged|emailed|"
+    r"(?:(?:spoke|talked|heard back) (?:with|to|from)|called|texted|phoned|asked|reached out to)"
+    r" (?:the |a )?(?:seller|merchant|vendor)|"
     r"checked (?:live|the order|inventory)|(?:placed|submitted) (?:an|the|your|this) order|"
     r"(?:buy|purchase|order|pay|verify|contact|message|email) (?:it|anything|the seller|the order|for you|on your behalf)|"
     r"(?:found|sourced|searched|pulled up|located) (?:you |some |these |the |three |two |\d+ )?"
     r"(?:live |current )?(?:listings|deals|inventory))\b"
     r"|\b(?:order|payment) (?:is |was |has been )?(?:confirmed|completed|placed|verified|processed|submitted)\b"
     r"|\b(?:verified|confirmed) (?:listing|seller|inventory|order|payment|availability)\b"
+    r"|\b(?:the seller|they) (?:told|confirmed to) (?:me|us)\b"
+    r"|\b(?:i|we) checked\b.{0,40}\b(?:stock|availability|listing|seller|online|live)\b"
+    r"|\b(?:stock|availability) (?:was |is |has been )?(?:verified|confirmed)\b"
     r"|\b(?:currently in stock|available now|your order (?:shipped|is (?:on its way|out for delivery)))\b",
     re.I,
 )
@@ -91,7 +96,7 @@ CONTRADICTORY_IDENTITY = re.compile(
     re.I,
 )
 
-POLICY_VERSION = 9
+POLICY_VERSION = 10
 
 INSTRUCTIONS = """You are TBD, the Entity's personal shopping assistant in iMessage. Serve the Entity's
 interests. Help shape a buying goal, compare the options they supply, and recommend a choice when
@@ -126,8 +131,27 @@ def without_greeting(text):
     return GREETING.sub("", text.strip(), count=1).strip()
 
 
-def without_quotes(text):
-    return re.sub(r"""“[^”]*”|"[^"]*"|‘[^’]*’|(?<!\w)'[^']*'(?!\w)""", "", text)
+QUOTATIONS = re.compile(
+    r"""“[^”]*(?:”|$)|"(?:\\.|[^"\\])*(?:"|$)|‘(?:’(?=\w)|[^’])*(?:’(?!\w)|$)"""
+    r"""|(?<!\w)'(?:'(?=\w)|[^'])*(?:'(?!\w)|$)|\x60[^\x60]*(?:\x60|$)"""
+)
+QUOTED_PLACEHOLDER = "\ufffc"
+QUOTE_CLOSER = {"“": "”", "‘": "’"}
+RETRACTION = (
+    r"\b(?:never ?mind|take (?:that|it) back|changed my mind|undo (?:that|it)|"
+    r"(?:don[’']t|do not) do (?:that|it))\b"
+)
+
+
+def quoted_text(text):
+    for match in QUOTATIONS.finditer(text):
+        quote = match[0]
+        closer = QUOTE_CLOSER.get(quote[0], quote[0])
+        yield quote[1:-1] if len(quote) > 1 and quote.endswith(closer) else quote[1:]
+
+
+def without_quotes(text, replacement=" "):
+    return QUOTATIONS.sub(replacement, text)
 
 
 def request_clauses(text):
@@ -140,9 +164,9 @@ def request_clauses(text):
 def direct_reply(text):
     for request in request_clauses(text):
         # A direct question can follow a comma-separated introduction.
-        if DIRECT_IDENTITY.fullmatch(request.rpartition(",")[2].strip()):
+        if DIRECT_IDENTITY.fullmatch(re.sub("^" + REQUEST_PREFIX, "", request.rpartition(",")[2].strip(), flags=re.I)):
             return IDENTITY
-        if DIRECT_CAPABILITIES.fullmatch(request):
+        if DIRECT_CAPABILITIES.fullmatch(re.sub("^" + REQUEST_PREFIX, "", request, flags=re.I)):
             return CAPABILITIES
         if re.fullmatch(REQUEST_PREFIX + r"(?:switch|change|use|pick|select)\b.{0,60}\bmodel\b.*", request, re.I):
             return "TBD selects the model used in this chat. Tell me what you’d like help with."
@@ -167,17 +191,37 @@ def unsupported_action(text):
 
 
 def action_clauses(text):
+    return split_actions(without_quotes(text))
+
+
+def split_actions(text):
     return [
         part.strip(" ,.!?")
         for part in re.split(r"[;\n]|[.!?]\s+|,?\s+(?:and|then|also)\s+", without_greeting(text), flags=re.I)
     ]
 
 
-def close_requested(text):
-    return (
-        any(
-            CLOSE_BRIEF.fullmatch(re.sub(r"^(?:thanks[, ]+)?(?:please )?", "", part, flags=re.I))
-            for part in action_clauses(text)
-        )
-        and not re.search(r"\b(?:never mind|take (?:that|it) back|actually|undo|don[’']t|do not)\b", text, re.I)
-    )
+def is_close(text):
+    return CLOSE_BRIEF.fullmatch(
+        re.sub(r"^(?:thanks[, ]+)?(?:please )?", "", text, flags=re.I)
+    ) is not None
+
+
+def close_intent(text):
+    parts = split_actions(without_quotes(text, f" {QUOTED_PLACEHOLDER} "))
+    if any(is_close(part) for quoted in quoted_text(text) for part in split_actions(quoted)):
+        return "clarify"
+    negative = r"^(?:do not|don[’']t|never mind)[, ]+"
+    if any(is_close(re.sub(negative, "", part, flags=re.I))
+           for part in parts if re.match(negative, part, re.I)):
+        return "clarify"
+    if any(is_close(part) for part in parts):
+        other = " ".join(part for part in parts if not is_close(part))
+        if re.search(
+            RETRACTION + r"|\b(?:keep|leave)\b.{0,40}\b(?:brief|it|that)\b"
+            r"|\b(?:don[’']t|do not)\s+(?:close|clear|finish|cancel|drop)\b",
+            other, re.I,
+        ):
+            return "clarify"
+        return "close"
+    return None

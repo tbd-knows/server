@@ -14,8 +14,8 @@ from tbd_server.user.store import Problem
 
 from .memory import TASK_CORRECTION, TASK_ONLY, is_memory_input, normalize, recipient_scope, resolved_preferences
 from .policy import (
-    ACTION, CONTRADICTORY_IDENTITY, FALSE_CONFIRMATION, INSTRUCTIONS, SECRET, SHOPPING_REQUEST,
-    action_clauses, profile_request, unsupported_action, without_greeting, without_quotes,
+    ACTION, CONTRADICTORY_IDENTITY, FALSE_CONFIRMATION, IDENTITY, INSTRUCTIONS, QUOTATIONS, SECRET, SHOPPING_REQUEST,
+    action_clauses, profile_request, request_clauses, unsupported_action, without_greeting, without_quotes,
 )
 
 SKEW = timedelta(seconds=2)
@@ -53,7 +53,8 @@ RECIPIENT_ANSWER = (
 )
 PRICE_AMOUNT = r"\$\s?\d[\d,]*(?:\.\d{2})?"
 PRICE = f"({PRICE_AMOUNT})"
-SIZE = r"(\d{1,3}(?:\.\d{1,2})?(?:\s*(?:us|uk|eu|wide))?|xxxs|xxs|xs|s|m|l|xl|xxl|xxxl)"
+SIZE_VALUE = r"(?:\d{1,3}(?:\.\d{1,2})?(?:\s*(?:us|uk|eu|wide))?|xxxs|xxs|xs|s|m|l|xl|xxl|xxxl)"
+SIZE = f"({SIZE_VALUE})"
 RECIPIENT_SIZE = re.compile(
     r"(my [\w-]+)(?: (?:wears|takes|needs) (?:a )?size|[’']s (?:shoe )?size(?: is|:))\s+" + SIZE,
     re.I,
@@ -82,7 +83,7 @@ CONSTRAINTS = {
     "brand": r"(?:my brand(?: is|:)|i (?:need|want|prefer) (?:the )?brand) (.+)",
     "material": r"(?:my material(?: is|:)|i (?:need|want|prefer)) (cotton|linen|wool|leather|silk|polyester|nylon|denim|suede)",
 }
-CONTEXT_VERSION = 3
+CONTEXT_VERSION = 4
 SCHEMA_VERSION = 1
 
 
@@ -128,29 +129,46 @@ def visible(parent, turn):
     return observed is not None and observed < min(turn["created_at"], turn["source_at"] - SKEW)
 
 
+TYPED_VALUES = {
+    "size": r"(?:size )?" + SIZE,
+    "budget": r"(?:up to |under )?\$\s?[\d,.]{1,12}",
+    "deadline": r"(?:by )?(?:today|tomorrow|(?:next )?(?:mon|tues|wednes|thurs|fri|satur|sun)day|\d{4}-\d{2}-\d{2})",
+    "condition": r"new|used|like new|refurbished|secondhand",
+    "fit": r"slim|regular|relaxed|wide|narrow|loose|oversized",
+    "material": r"cotton|linen|wool|leather|silk|polyester|nylon|denim|suede",
+    "recipient": RECIPIENT_ANSWER,
+    "brand": r"brand[: ]+[\w -]{1,48}",
+}
+CONFIRMATION = re.compile(r"yes(?: please)?|correct", re.I)
+ACKNOWLEDGMENT = re.compile(r"no(?: thanks)?|sure", re.I)
+
+
+def answer_text(text):
+    return text.strip().rstrip(".!")
+
+
+def short_answer(text):
+    answer = answer_text(text).rstrip("?")
+    return (
+        CONFIRMATION.fullmatch(answer) is not None or ACKNOWLEDGMENT.fullmatch(answer) is not None
+        or any(re.fullmatch(pattern, answer, re.I) for pattern in TYPED_VALUES.values())
+    )
+
+
 def typed_answer(text, question, brief):
     if not question or not brief or question["brief_id"] != brief["id"]:
         return None
     field, value = question["field"], question["value"]
-    answer = text.strip().rstrip(".!")
+    answer = answer_text(text)
     if value is not None:
-        return {field: value} if answer.casefold() in ("yes", "yes please", "correct") else None
-    # Open questions accept small, field-shaped replies only.
-    patterns = {
-        "size": r"(?:size )?" + SIZE,
-        "budget": r"(?:up to |under )?\$\s?[\d,.]{1,12}",
-        "deadline": r"(?:by )?(?:today|tomorrow|(?:next )?(?:mon|tues|wednes|thurs|fri|satur|sun)day|\d{4}-\d{2}-\d{2})",
-        "condition": r"new|used|like new|refurbished|secondhand",
-        "fit": r"slim|regular|relaxed|wide|narrow|loose|oversized",
-        "material": r"cotton|linen|wool|leather|silk|polyester|nylon|denim|suede",
-        "recipient": RECIPIENT_ANSWER,
-    }
-    if field in patterns and re.fullmatch(patterns[field], answer, re.I):
-        if field == "recipient" and answer.casefold().startswith("for "):
-            answer = answer[4:]
-        return {field: answer}
-    if field == "brand" and (match := re.fullmatch(r"brand[: ]+([\w -]{1,48})", answer, re.I)):
-        return {field: match[1]}
+        return {field: value} if CONFIRMATION.fullmatch(answer) else None
+    if pattern := TYPED_VALUES.get(field):
+        if re.fullmatch(pattern, answer, re.I):
+            if field == "recipient" and answer.casefold().startswith("for "):
+                answer = answer[4:]
+            if field == "brand":
+                answer = re.sub(r"^brand[: ]+", "", answer, flags=re.I)
+            return {field: answer}
     return None
 
 
@@ -261,7 +279,7 @@ def request_constraints(text, brief=None):
             item = re.split(r"\s+(?:for|with|under|up to|at most|by|in size)\b|,", details, maxsplit=1, flags=re.I)[
                 0
             ].strip()
-            if re.fullmatch(OPTION_REFERENCE, item, re.I):
+            if re.fullmatch(OPTION_REFERENCE + r"(?: again)?", item, re.I):
                 continue
             item = re.sub(r"^(?:both |these |those |some |a pair of |a gift of |a |an )", "", item, flags=re.I)
             if re.fullmatch(r"[A-Z][\w-]+(?: (?:and|or) [A-Z][\w-]+)+", item):
@@ -378,7 +396,6 @@ def needs_gift_size(text, constraints, projected_brief, answer, preferences, *, 
 class ActiveBrief:
     value: dict
     task_cutoff: int
-    supplied_options: list
 
 
 def brief_in_use(cur, turn, state):
@@ -432,7 +449,7 @@ def brief_in_use(cur, turn, state):
         entry for entry in brief["options"]
         if is_supplied_option(entry["value"], eligible[UUID(entry["source"])]["text"])
     ]
-    return ActiveBrief({**brief, "activity_at": at.isoformat()}, max(opening_sequence, cutoff), options)
+    return ActiveBrief({**brief, "activity_at": at.isoformat(), "options": options}, max(opening_sequence, cutoff))
 
 
 def previous_turns(cur, turn):
@@ -454,9 +471,13 @@ def previous_turns(cur, turn):
     ).fetchall()
 
 
+def app_identity(parent):
+    return parent["outcome"] == "control" and parent["reply"] == IDENTITY
+
+
 def eligible_parent(parent, turn, state):
     return (
-        parent["outcome"] in ("model", "fallback")
+        (parent["outcome"] in ("model", "fallback") or app_identity(parent))
         and after_reset(parent, state)
         and state["enrolled_at"] <= parent["source_at"] <= turn["source_at"]
         and parent["source_at"] <= parent["created_at"] + SKEW
@@ -489,23 +510,31 @@ def bound_answer(text, parent, brief, turn, state):
     return scoped_answer(brief, typed_answer(text, target, brief))
 
 
-ISOLATED = re.compile(
-    r"(?:yes(?: please)?|no(?: thanks)?|correct|sure|size [\w.]+|[\d.]+|\$[\d,.]+|XS|S|M|L|XL|XXL|"
-    r"(?:brand[: ]+[\w -]{1,48})|(?:new|used|like new|refurbished|secondhand|slim|regular|relaxed|wide|"
-    r"narrow|loose|oversized|cotton|linen|wool|leather|silk|polyester|nylon|denim|suede|today|tomorrow)|"
-    + RECIPIENT_ANSWER + r")", re.I,
-)
 VAGUE_TASK = re.compile(
     r"^(?:(?:(?:can|could|would) you )?(?:please )?(?:compare|pick|choose) " + OPTION_REFERENCE + r"\b|"
     r"which (?:option|one|fits|works|is better|of (?:the|these|those))|"
     r"(?:continue|resume|pick up|back to) (?:where|my|the|that|this)|what about (?:that|those|the other))", re.I,
 )
 NAME = r"[^\W\d_][\w’'-]*(?: [^\W\d_][\w’'-]*){0,4}"
+INTRODUCTION = (
+    r"(?:my name is|i go by|call me) " + NAME +
+    r"|(?:i am|i[’']m) (?-i:[A-Z][a-z]+(?: [A-Z][a-z]+)*)"
+)
+
+
+def identity_introduction(text):
+    clauses = (part.split(",", 1)[0].strip() for part in request_clauses(text))
+    names = [
+        clause for clause in clauses
+        if re.fullmatch(INTRODUCTION, clause, re.I) and not SHOPPING_REQUEST.match(clause)
+    ]
+    return names[0] if len(names) == 1 else None
+
+
 SOCIAL = re.compile(
     r"(?:[\W]*|thanks(?: for your help)?|thank you|how are you(?: doing)?|"
     r"nice to meet you|good to meet you|what(?: is|'s|’s) my name|do you remember my name|"
-    r"(?:my name is|i go by|call me) " + NAME +
-    r"|(?:i am|i[’']m) (?-i:[A-Z][a-z]+(?: [A-Z][a-z]+)*))", re.I,
+    + INTRODUCTION + r")", re.I,
 )
 
 
@@ -537,7 +566,7 @@ def resolve_scope(turn, state, active, previous):
             return TurnScope(active, constraints, clarification=SCOPE_CLARIFICATIONS[("recipient",)])
     answer = bound_answer(text, previous[0], brief, turn, state) if previous else None
     scope = {**(answer or {}), **constraints}
-    if without_greeting(text) and ISOLATED.fullmatch(text.strip().rstrip(".!?")) and not answer:
+    if without_greeting(text) and short_answer(text) and not answer:
         return TurnScope(active, constraints, clarification=RESTATEMENT)
     if brief is None and not scope.get("item") and any(
         VAGUE_TASK.search(without_greeting(clause)) for clause in message_clauses(text)
@@ -623,19 +652,24 @@ def context(cur, turn, state):
         for parent in reversed(previous):
             if not eligible_parent(parent, turn, state):
                 continue
-            if not task_history_matches(parent, None if corrected else projected, scope):
+            prior_text = parent["text"]
+            if app_identity(parent):
+                prior_text = identity_introduction(prior_text)
+                if not prior_text:
+                    continue
+            elif not task_history_matches(parent, None if corrected else projected, scope):
                 continue
             reply = parent["reply"]
             visible_reply = (
-                parent["outcome"] == "model" and reply and visible(parent, turn)
+                (parent["outcome"] == "model" or app_identity(parent)) and reply and visible(parent, turn)
                 and not SECRET.search(reply) and not FALSE_CONFIRMATION.search(reply) and not CONTRADICTORY_IDENTITY.search(reply)
             )
-            recent.append({"source": str(parent["id"]), "user": parent["text"], "reply": reply if visible_reply else None})
+            recent.append({"source": str(parent["id"]), "user": prior_text, "reply": reply if visible_reply else None})
     reply_size = gift_size_for_reply(text, scope.constraints)
     if projected:
         projected = {
             "id": projected["id"], "activity_at": projected["activity_at"],
-            "fields": projected["fields"], "options": scope.active.supplied_options,
+            "fields": projected["fields"], "options": projected["options"],
         }
     payload = {
         "current": text,
@@ -676,24 +710,33 @@ class BriefEvidenceError(BriefValidationError):
         self.field = field
 
 
-def is_supplied_option(value, text):
-    if not scope_mentioned(value.casefold(), text.casefold()):
-        return False
-    unquoted = {normalize(clause) for clause in message_clauses(text)}
-    return not any(
-        normalize(clause) in unquoted and any(re.fullmatch(pattern, clause, re.I) for pattern in CONSTRAINTS.values())
-        for clause in message_clauses(value)
-    )
-
-
-OPTION_LABEL = r"\b([A-Z][\w-]*(?: [A-Z0-9][\w-]*){0,3})"
-PRICE_PREFIX = r"\s+(?i:costs?|is|runs?|asks?|for|at)\s+"
+OPTION_LABEL = (
+    r"\b((?i:(?:the )?(?:seller|listing|option)(?: [a-z0-9]+)?)|[A-Z][\w-]*(?: [A-Z0-9][\w-]*){0,3})"
+)
+CONDITION_VALUE = r"(?:brand new|like new|new|used|refurbished|secondhand)"
+PRICE_PREFIX = (
+    r"(?i:\s*:\s*|\s+(?:costs?|is|runs?|asks?|for|at)\s+|"
+    rf"\s+is (?:{CONDITION_VALUE}|size {SIZE_VALUE}) (?:and costs?|for|at)\s+)"
+)
 PRICE_CLAIM = PRICE_PREFIX + PRICE
+SIZE_VERB = r"(?:is(?: available in)?|comes? in|available in|in|at)"
 SIZE_CLAIM = (
-    rf"(?i:(?:{PRICE_PREFIX}{PRICE_AMOUNT}\s*,\s*|"
-    r"\s+(?:(?:is(?: available in)?|comes? in|available in|in|at)\s+(?:a )?)?|\s*[:(–—]\s*)size\s+"
+    rf"(?i:(?:{PRICE_PREFIX}{PRICE_AMOUNT}(?:\s*,\s*|\s+and {SIZE_VERB}\s+)|"
+    rf"\s+(?:{SIZE_VERB}\s+(?:a )?)?|\s*[:(–—]\s*)size\s+"
     r"|[’']s\s+(?:shoe )?size(?: is|:)\s*)" + SIZE + r"\b"
 )
+CONDITION_CLAIM = (
+    r"(?i:(?:\s+(?:is(?: listed as)?|in|describes it as)\s+|\s*[:,–—]\s*(?:condition\s*:?\s*)?)"
+    + f"({CONDITION_VALUE})" + r"\b)"
+)
+OPTION_DESCRIPTION = re.compile(
+    OPTION_LABEL + r"(?i:\s+(?:has|includes|weighs|measures|is made of)\s+\S"
+    r"|\s+(?:is|comes in)\s+(?:waterproof|cotton|linen|wool|leather|silk|polyester|nylon|denim|suede)\b)"
+)
+LISTING_ATTRIBUTION = re.compile(
+    r"\b(?:listing|seller|option)(?: [A-Z0-9]+)? (?:says|reads|lists|describes it as)\s*:?\s*$", re.I,
+)
+NON_OPTION_LABELS = {"i", "we", "you", "your", "my", "our", "it", "this", "that", "both", "which", "what"}
 
 
 def amount(value):
@@ -705,17 +748,66 @@ def size_token(value):
     return normalize(value).removeprefix("size ").replace(" ", "")
 
 
-def option_numbers_match(reply, sources, claim, canonical):
-    pattern = re.compile(OPTION_LABEL + claim)
-    by_option = {}
-    for source in sources:
-        for label, value in pattern.findall(source):
-            name = normalize(label).removeprefix("the ")
-            by_option.setdefault(name, set()).add(canonical(value))
-    for name, values in by_option.items():
-        named_claim = r"\b" + re.escape(name) + claim
-        if any(canonical(match) not in values for match in re.findall(named_claim, reply, re.I)):
+def condition_token(value):
+    condition = normalize(value)
+    return {"brand new": "new", "secondhand": "used"}.get(condition, condition)
+
+
+LISTING_CLAIMS = {
+    "price": (PRICE_CLAIM, amount),
+    "size": (SIZE_CLAIM, size_token),
+    "condition": (CONDITION_CLAIM, condition_token),
+}
+
+
+def option_name(label):
+    name = normalize(label).removeprefix("the ")
+    if name.split()[0] not in NON_OPTION_LABELS:
+        return name
+    return None
+
+
+def listing_facts(sources):
+    facts = {}
+    for field, (claim, canonical) in LISTING_CLAIMS.items():
+        for source in sources:
+            for label, value in re.findall(OPTION_LABEL + claim, source):
+                if name := option_name(label):
+                    facts.setdefault(name, {}).setdefault(field, set()).add(canonical(value))
+    return facts
+
+
+def is_supplied_option(value, text):
+    if not scope_mentioned(value.casefold(), text.casefold()):
+        return False
+    unquoted = {normalize(clause) for clause in message_clauses(text)}
+    if any(
+        normalize(clause) in unquoted and any(re.fullmatch(pattern, clause, re.I) for pattern in CONSTRAINTS.values())
+        for clause in message_clauses(value)
+    ):
+        return False
+    if listing_facts([value]) or any(option_name(label) for label in OPTION_DESCRIPTION.findall(value)):
+        return True
+    # Standalone listing details need an explicit seller/listing attribution.
+    if not re.fullmatch(rf"(?:size {SIZE_VALUE}|{PRICE_AMOUNT}|{CONDITION_VALUE})", value, re.I):
+        return False
+    return any(
+        scope_mentioned(value.casefold(), quote[0].casefold()) and LISTING_ATTRIBUTION.search(text[:quote.start()])
+        for quote in QUOTATIONS.finditer(text)
+    )
+
+
+def listing_claims_match(reply, sources):
+    supplied = listing_facts(sources)
+    for name, claims in listing_facts([reply]).items():
+        if any(not values <= supplied.get(name, {}).get(field, set()) for field, values in claims.items()):
             return False
+    # Also match case-insensitive references to labels identified in the supplied listings.
+    for name, evidence in supplied.items():
+        for field, (claim, canonical) in LISTING_CLAIMS.items():
+            named_claim = r"\b" + re.escape(name) + claim
+            if any(canonical(match) not in evidence.get(field, ()) for match in re.findall(named_claim, reply, re.I)):
+                return False
     return True
 
 
@@ -725,10 +817,9 @@ def grounded_numbers(reply, prompt):
     sources = [context["current"], *(parent["user"] for parent in context["recent"])]
     if brief := context["brief"]:
         sources.extend(entry["value"] for entry in brief["options"])
-    for key, pattern, named_claim in (("budget", PRICE, PRICE_CLAIM), ("size", SIZE_MENTION, SIZE_CLAIM)):
-        format_value = amount if key == "budget" else size_token
-        if not option_numbers_match(reply, sources, named_claim, format_value):
-            return False
+    if not listing_claims_match(reply, sources):
+        return False
+    for key, pattern, format_value in (("budget", PRICE, amount), ("size", SIZE_MENTION, size_token)):
         values = {
             format_value(value)
             for source in sources for value in re.findall(pattern, source)
@@ -773,7 +864,7 @@ def validate(raw, turn, brief, answer, *, require_gift_size=False, prompt=None):
     if social_text(text) and not scope and (result.brief != "unchanged" or result.question):
         raise BriefValidationError("A social turn cannot edit the brief or attach a question")
     if prompt is not None and not require_gift_size and not grounded_numbers(reply, prompt):
-        raise ValueError("A price or size conflicts with supplied evidence")
+        raise ValueError("A listing claim conflicts with supplied evidence")
     if len(result.edits) > 12:
         raise BriefValidationError("Too many edits")
     if result.brief in ("unchanged", "close") and result.edits:
