@@ -3735,10 +3735,8 @@ def test_agentification_policy_with_controlled_alternate_adapter(agent_pilot):
             edits=[
                 {"field": "item", "value": "running shoes"},
                 {"field": "budget", "value": "$90"},
-                {"field": "option", "value": "Aspen costs $80"},
-                {"field": "option", "value": "Birch costs $105"},
-                {"field": "option", "value": "Aspen is size 8"},
-                {"field": "option", "value": "Birch is size 10"},
+                {"field": "option", "value": "Aspen costs $80, size 8"},
+                {"field": "option", "value": "Birch costs $105, size 10"},
             ],
             question={"field": "size", "value": None},
         ),
@@ -3779,8 +3777,8 @@ def test_agentification_policy_with_controlled_alternate_adapter(agent_pilot):
     assert calls[0]["current_constraints"] == {} and state()["brief"] is None
     observe_agent_reply_sent(store, account, pairs, greeting, result)
     shopping, question, reply = settle(
-        "Hi TBD, I’m looking for running shoes under $90. Aspen costs $80. Birch costs $105. "
-        "Aspen is size 8. Birch is size 10.", "model",
+        "Hi TBD, I’m looking for running shoes under $90. Aspen costs $80, size 8. Birch costs $105, size 10.",
+        "model",
     )
     assert calls[1]["current_constraints"] == {"item": "running shoes", "budget": "$90"}
     assert any(row["user"] == greeting["text"] for row in calls[1]["recent"])
@@ -3800,12 +3798,15 @@ def test_agentification_policy_with_controlled_alternate_adapter(agent_pilot):
 
     _, _, reply = settle("Compare running shoes.", "model")
     assert reply == "Aspen comes in size 8 and Birch comes in size 10."
-    assert {option["value"] for option in calls[-1]["brief"]["options"]} >= {"Aspen is size 8", "Birch is size 10"}
+    assert {option["value"] for option in calls[-1]["brief"]["options"]} == {
+        "Aspen costs $80, size 8", "Birch costs $105, size 10",
+    }
 
     runner.adapter = None
     for body, expected in (
         ("Hi TBD, who am I talking to?", "I’m TBD"),
         ("My name is Alex. What’s your name?", "I’m TBD"),
+        ("My name is Alex, what’s your name?", "I’m TBD"),
         ("What can you help me with?", "compare options you share"),
         ("Switch your model to another one.", "TBD selects"),
         ("https://example.test/listing", "paste the item details"),
@@ -3855,7 +3856,8 @@ def test_agentification_memory_alias_correction_and_full_prompt_cutoffs(agent_pi
                 brief="update",
                 edits=[
                     {"field": "item", "value": "shoes"}, {"field": "recipient", "value": "me"},
-                    {"field": "size", "value": "8 wide"}, {"field": "option", "value": "Aspen costs $80"},
+                    {"field": "size", "value": "8 wide"}, {"field": "budget", "value": "$90"},
+                    {"field": "option", "value": "Aspen costs $80"},
                 ],
             ))
         if body.startswith("Correct size"):
@@ -3878,7 +3880,7 @@ def test_agentification_memory_alias_correction_and_full_prompt_cutoffs(agent_pi
 
     runner.adapter = provider
     intro, _ = settle("My name is Juniper.", "model")
-    old, _ = settle("Compare shoes for me. My size is 8 wide. Aspen costs $80.", "model")
+    old, _ = settle("Compare shoes for me. My size is 8 wide. My budget is $90. Aspen costs $80.", "model")
     assert any(row["user"] == intro["text"] for row in calls[-1]["recent"])
     original = state()
     first, first_reply = settle("Remember size for shoes for myself is 8 wide", "control")
@@ -3898,10 +3900,15 @@ def test_agentification_memory_alias_correction_and_full_prompt_cutoffs(agent_pi
     for field in ("brief", "preferences", "reset_sequence", "reset_source_at"):
         assert after_withdrawal[field] == before_withdrawal[field]
 
-    task, _ = settle("Correct size for shoes for me to 10 for this purchase.", "model")
-    assert "8 wide" not in json.dumps(calls[-1])
-    assert state()["brief"]["fields"]["size"] == {"value": "10", "source": str(task["id"])}
-    assert state()["preferences"]["shoes|me|size"]["value"] == "8 wide"
+    task, reply = settle("Correct size for shoes for me to 10 for this purchase. Keep the budget at $90.", "model")
+    assert "use size 10" in reply
+    assert calls[-1]["current_constraints"]["size"] == "10" and "8 wide" not in json.dumps(calls[-1])
+    after_correction = state()
+    assert after_correction["brief"]["fields"]["size"] == {"value": "10", "source": str(task["id"])}
+    assert after_correction["brief"]["fields"]["budget"] == before_withdrawal["brief"]["fields"]["budget"]
+    for field in ("preferences", "reset_sequence", "reset_source_at"):
+        assert after_correction[field] == before_withdrawal[field]
+    assert after_correction["preferences"]["shoes|me|size"]["value"] == "8 wide"
     settle("Compare shoes for myself", "model")
     assert "8 wide" not in json.dumps(calls[-1])
 

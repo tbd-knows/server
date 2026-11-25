@@ -91,7 +91,7 @@ CONTRADICTORY_IDENTITY = re.compile(
     re.I,
 )
 
-POLICY_VERSION = 8
+POLICY_VERSION = 9
 
 INSTRUCTIONS = """You are TBD, the Entity's personal shopping assistant in iMessage. Serve the Entity's
 interests. Help shape a buying goal, compare the options they supply, and recommend a choice when
@@ -139,7 +139,8 @@ def request_clauses(text):
 
 def direct_reply(text):
     for request in request_clauses(text):
-        if DIRECT_IDENTITY.fullmatch(request):
+        # A direct question can follow a comma-separated introduction.
+        if DIRECT_IDENTITY.fullmatch(request.rpartition(",")[2].strip()):
             return IDENTITY
         if DIRECT_CAPABILITIES.fullmatch(request):
             return CAPABILITIES

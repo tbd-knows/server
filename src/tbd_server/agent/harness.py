@@ -51,7 +51,8 @@ RECIPIENT_ANSWER = (
     r"(?:for )?(?:me|myself|my (?:partner|friend|child|mom|mother|dad|father|sister|brother))|"
     r"for (?-i:[A-Z][a-z]+(?: [A-Z][a-z]+)*)"
 )
-PRICE = r"(\$\s?\d[\d,]*(?:\.\d{2})?)"
+PRICE_AMOUNT = r"\$\s?\d[\d,]*(?:\.\d{2})?"
+PRICE = f"({PRICE_AMOUNT})"
 SIZE = r"(\d{1,3}(?:\.\d{1,2})?(?:\s*(?:us|uk|eu|wide))?|xxxs|xxs|xs|s|m|l|xl|xxl|xxxl)"
 RECIPIENT_SIZE = re.compile(
     r"(my [\w-]+)(?: (?:wears|takes|needs) (?:a )?size|[’']s (?:shoe )?size(?: is|:))\s+" + SIZE,
@@ -81,7 +82,7 @@ CONSTRAINTS = {
     "brand": r"(?:my brand(?: is|:)|i (?:need|want|prefer) (?:the )?brand) (.+)",
     "material": r"(?:my material(?: is|:)|i (?:need|want|prefer)) (cotton|linen|wool|leather|silk|polyester|nylon|denim|suede)",
 }
-CONTEXT_VERSION = 2
+CONTEXT_VERSION = 3
 SCHEMA_VERSION = 1
 
 
@@ -176,28 +177,44 @@ def current_constraints(text, brief=None):
 
 WITHDRAWAL = re.compile(
     r"(?:^|[,;]|\bbut\b|\band\b)\s*(?:(?:actually|instead)\b[, ]*)?"
-    r"(?:keep\b|never ?mind\b|take (?:that|it) back\b|(?:do not|don[’']t) (?:change|correct|update)\b|"
-    r"leave\b.{0,36}\b(?:alone|as (?:it is|is))\b)", re.I,
+    r"(?:(?P<retract>take (?:that|it) back)|keep|leave|never ?mind|"
+    r"(?:do not|don[’']t) (?:change|correct|update))\b", re.I,
+)
+RETAINED_FIELD = re.compile(r"(?:(?:the|my|current|existing|original|old|previous|same)\s+)*(\w+)", re.I)
+CORRECTION_REFERENCE = re.compile(
+    r"(?:about )?(?:it|that(?: change| correction)?|the (?:change|correction)|everything)"
+    r"(?: alone| as (?:it )?is| unchanged| the same)?",
+    re.I,
 )
 
 
 def task_correction(clause):
+    follow_up = WITHDRAWAL.search(clause)
+    if follow_up:
+        clause = clause[:follow_up.start()].rstrip(" ,")
     if TASK_ONLY.search(clause):
         return TASK_CORRECTION.fullmatch(TASK_ONLY.sub("", clause))
     return None
 
 
 def withdrawn_task_correction(text):
-    # Recognize a withdrawal after a complete task-only instruction, including in the same sentence.
     if not re.search(r"\bcorrect\b", text, re.I):
         return False
-    instruction_seen = False
+    corrected_fields = set()
     for clause in message_clauses(text):
         clause = without_greeting(clause)
+        if correction := task_correction(clause):
+            corrected_fields.add(correction[1].casefold())
+        if not corrected_fields:
+            continue
         for withdrawal in WITHDRAWAL.finditer(clause):
-            if instruction_seen or task_correction(clause[:withdrawal.start()].rstrip(" ,")):
+            target = clause[withdrawal.end():].strip(" ,")
+            field = RETAINED_FIELD.match(target)
+            if (
+                withdrawal["retract"] or not target or CORRECTION_REFERENCE.fullmatch(target)
+                or (field and field[1].casefold() in corrected_fields)
+            ):
                 return True
-        instruction_seen = instruction_seen or task_correction(clause) is not None
     return False
 
 
@@ -670,9 +687,11 @@ def is_supplied_option(value, text):
 
 
 OPTION_LABEL = r"\b([A-Z][\w-]*(?: [A-Z0-9][\w-]*){0,3})"
-PRICE_CLAIM = r"\s+(?i:costs?|is|runs?|asks?|for|at)\s+" + PRICE
+PRICE_PREFIX = r"\s+(?i:costs?|is|runs?|asks?|for|at)\s+"
+PRICE_CLAIM = PRICE_PREFIX + PRICE
 SIZE_CLAIM = (
-    r"(?i:(?:\s+(?:(?:is(?: available in)?|comes? in|available in|in|at)\s+(?:a )?)?|\s*[:(–—]\s*)size\s+"
+    rf"(?i:(?:{PRICE_PREFIX}{PRICE_AMOUNT}\s*,\s*|"
+    r"\s+(?:(?:is(?: available in)?|comes? in|available in|in|at)\s+(?:a )?)?|\s*[:(–—]\s*)size\s+"
     r"|[’']s\s+(?:shoe )?size(?: is|:)\s*)" + SIZE + r"\b"
 )
 

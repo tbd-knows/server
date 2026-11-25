@@ -488,6 +488,7 @@ def test_paid_gift_replay_misses_render_an_open_recipient_size_question(prematur
     ". Actually, keep size 8.",
     ", actually keep size 8.",
     " but don't change it.",
+    ". Actually, never mind about that.",
 ])
 def test_withdrawn_task_correction_has_no_edit_evidence(withdrawal):
     correction = "Correct size for shoes for me to 10 for this purchase"
@@ -527,3 +528,26 @@ def test_conflicting_assistant_identity_is_rejected(reply):
 @pytest.mark.parametrize("reply", ["You’re chatting with your TBD shopping assistant.", "I’m happy to help."])
 def test_assistant_can_describe_its_role(reply):
     assert harness.validate(generated(reply=reply), turn("Hi TBD!"), None, None)[0] == reply
+
+
+@pytest.mark.parametrize("separator", [". ", ", "])
+def test_retaining_budget_preserves_size_correction_evidence(separator):
+    inbound = turn(f"Correct size for shoes for me to 10 for this purchase{separator}keep the budget at $90.")
+    brief = {
+        "id": "opening", "options": [],
+        "fields": {"item": {"value": "shoes"}, "size": {"value": "8"}, "budget": {"value": "$90"}},
+    }
+    proposal = generated(brief="update", edits=[{"field": "size", "value": "10"}])
+    _, updated, _ = harness.validate(proposal, inbound, brief, None)
+    assert updated["fields"]["size"]["value"] == "10"
+    assert updated["fields"]["budget"] == brief["fields"]["budget"]
+
+
+def test_size_after_listed_price_is_bound_to_its_option():
+    inbound = turn("Compare shoes. Aspen costs $80, size 8. Birch costs $105, size 10.")
+    active = state(inbound)
+    prompt = harness.context(scope_cursor(active), inbound, active).prompt
+    with pytest.raises(ValueError, match="price or size conflicts"):
+        harness.validate(generated(reply="Aspen comes in size 10."), inbound, None, None, prompt=prompt)
+    reply, _, _ = harness.validate(generated(reply="Aspen comes in size 8."), inbound, None, None, prompt=prompt)
+    assert reply == "Aspen comes in size 8."
