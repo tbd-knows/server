@@ -4154,6 +4154,7 @@ def open_reviewed_shoes(agent, *, question=None):
     "Forget all preferences. Compare backpacks without clearing my preferences.",
     "Forget all preferences. Compare backpacks but hold off on the first part.",
     "Forget all preferences. Compare backpacks and hold off on the first part.",
+    "Forget all preferences. Compare backpacks instead.",
     "Forget all preferences. Compare backpacks without changing what you’ve saved.",
     "Forget all preferences. Compare backpacks without making any changes.",
     "Forget all preferences. Compare backpacks without leather unless it changes anything.",
@@ -4210,7 +4211,11 @@ def test_reviewed_r1_explicit_mixed_forget_commits_once(reviewed_agent, body):
 
 
 @pytest.mark.parametrize("mode", ["model", "fallback", "offline"])
-@pytest.mark.parametrize("switch", ["Let’s switch to backpacks.", "Let’s switch to the two backpacks"])
+@pytest.mark.parametrize("switch", [
+    "Let’s switch to backpacks.",
+    "Let’s switch to the two backpacks",
+    "switch to the 2 backpacks",
+])
 def test_reviewed_r3_reference_keeps_brief_and_switch_retires_it(reviewed_agent, mode, switch):
     from tbd_server.agent import harness
     from tbd_server.agent.adapter import Generation
@@ -4227,6 +4232,8 @@ def test_reviewed_r3_reference_keeps_brief_and_switch_retires_it(reviewed_agent,
             Generation(generated(reply="Aspen costs $80, and Birch costs $90.")),
             Generation(generated(reply="Aspen is $80. Birch is $90.")),
             Generation(generated(reply="Birch costs $90. Aspen is $80.")),
+            Generation(generated(reply="Aspen is $80. Birch is $90.")),
+            Generation(generated(reply="Birch costs $90. Aspen is $80.")),
             Generation(generated(reply="At $80, Aspen costs less than Birch at $90.")),
             Generation(generated(reply="Aspen is $80, compared with $90 for Birch.")),
             Generation(generated(reply="I’d check the fit measurements for both options.")),
@@ -4239,6 +4246,8 @@ def test_reviewed_r3_reference_keeps_brief_and_switch_retires_it(reviewed_agent,
         ("Compare them one last time", "Aspen costs $80, and Birch costs $90."),
         ("Compare the two please.", "Aspen is $80. Birch is $90."),
         ("Compare the two, please.", "Birch costs $90. Aspen is $80."),
+        ("Compare the 2 please", "Aspen is $80. Birch is $90."),
+        ("Compare the 2", "Birch costs $90. Aspen is $80."),
         ("Compare the two thanks", "At $80, Aspen costs less than Birch at $90."),
         ("Compare the two whenever you can.", "Aspen is $80, compared with $90 for Birch."),
         ("Compare both options but focus on fit", "I’d check the fit measurements for both options."),
@@ -4259,6 +4268,8 @@ def test_reviewed_r3_reference_keeps_brief_and_switch_retires_it(reviewed_agent,
                 assert agent.calls[-1]["current_constraints"] == {"item": "backpacks"}
         if mode == "offline":
             assert turn["granted_at"] is None and len(agent.calls) == 1
+        else:
+            assert turn["granted_at"] is not None and agent.calls[-1]["current"] == body
 
 
 def test_reviewed_r4_listing_provenance_excludes_obsolete_shopper_size(reviewed_agent):

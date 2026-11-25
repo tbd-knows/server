@@ -41,7 +41,7 @@ SHOPPING_BUDGET = re.compile(
 )
 COMPANION_QUALIFIER = re.compile(
     r"\b(?:and|or|but|yet|though|although|however|otherwise|without|unless|if|except|until|"
-    r"before|after|while|provided|as long as|rather than|instead of|so that|"
+    r"before|after|while|provided|as long as|rather than|instead|so that|"
     r"under|below|within|up to|at most)\b",
     re.I,
 )

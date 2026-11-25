@@ -34,9 +34,11 @@ NO_BRIEF = "There’s no open shopping brief. Tell me what you’d like to look 
 LINK_DETAILS = "Please paste the item details, price, and anything you want me to compare. I can work from what you share here."
 BRIEF_DETAILS = "What are you shopping for, who is it for, and what detail should I use?"
 SENSITIVE = "Please don’t share payment credentials or authentication secrets in this chat."
+OPTION_COUNT = r"(?:two|2)"
 OPTION_REFERENCE = (
-    r"(?:(?:both|the two|these two|those two|these|those|the other)(?: (?:options?|choices?|ones?|listings?))?"
-    r"|(?:the |two |these |those )?(?:options|choices|listings)|them|it|this|that)"
+    rf"(?:(?:both|(?:the|these|those) {OPTION_COUNT}|these|those|the other)"
+    r"(?: (?:options?|choices?|ones?|listings?))?"
+    rf"|(?:the |{OPTION_COUNT} |these |those )?(?:options|choices|listings)|them|it|this|that)"
 )
 RECIPIENT = re.compile(
     r"\b(?i:for) ((?i:me|myself|someone(?: else)?|(?:my|a|an|our|the) [\w-]+(?: [\w-]+)*?)"
@@ -83,7 +85,7 @@ CONSTRAINTS = {
     "brand": r"(?:my brand(?: is|:)|i (?:need|want|prefer) (?:the )?brand) (.+)",
     "material": r"(?:my material(?: is|:)|i (?:need|want|prefer)) (cotton|linen|wool|leather|silk|polyester|nylon|denim|suede)",
 }
-CONTEXT_VERSION = 10
+CONTEXT_VERSION = 11
 SCHEMA_VERSION = 1
 
 
@@ -243,17 +245,17 @@ REPEAT_REQUEST = r"(?:again|one more time|once more|side by side)"
 POLITE_EDGES = re.compile(r"^please\b[ ,]*|[ ,]+(?:please|thanks|thank you)$", re.I)
 REPEAT_SUFFIX = re.compile(r"(?:^|\s+)" + REPEAT_REQUEST + r"$", re.I)
 OPTION_REFERENCE_ONLY = re.compile(
-    OPTION_REFERENCE + r"|(?:both|(?:the|these|those) two) of (?:them|these|those)|"
+    OPTION_REFERENCE + rf"|(?:both|(?:the|these|those) {OPTION_COUNT}) of (?:them|these|those)|"
     r"the same(?: (?:options?|choices?|ones?|listings?))?|the pair|"
     r"(?:their|the) (?:prices?|sizes?|conditions?|differences)|"
     r"(?:what|the ones) (?:we discussed|you showed me)",
     re.I,
 )
 ACTIVE_OPTIONS_PREFIX = re.compile(
-    r"^(?:them|it|(?:both|the|these|those) (?:two )?(?:options?|choices?|ones?|listings?))\b",
+    rf"^(?:them|it|(?:both|the|these|those) (?:{OPTION_COUNT} )?(?:options?|choices?|ones?|listings?))\b",
     re.I,
 )
-COUNTED_TARGET = re.compile(r"^(?:the|these|those)\s+(?:two|2)\s+", re.I)
+COUNTED_TARGET = re.compile(rf"^(?:the|these|those)\s+{OPTION_COUNT}\s+", re.I)
 COUNTED_REFERENCE_TAIL = re.compile(
     r"^(?:of|when(?:ever)?|if|as|and|or|but|please|without|real quick|quickly|briefly)\b",
     re.I,
